@@ -18,6 +18,7 @@ from vector_core.errors import ErrorCode, error_response
 from mcp_docs.app import mcp
 from mcp_docs.models import DocumentStatus, ExtractionStatus
 from mcp_docs.singletons import (
+    get_document_indexer,
     get_document_processor,
     get_document_store,
     get_integrity_manager,
@@ -203,7 +204,14 @@ async def delete_document(document_id: str) -> dict:
         except Exception as e:
             logger.warning(f"Failed to mark fact sources as deleted: {e}")
 
-    # Delete
+    # Clean up vector index
+    try:
+        indexer = await get_document_indexer()
+        await indexer.delete_document_index(uuid)
+    except Exception as e:
+        logger.warning(f"Failed to delete document index: {e}")
+
+    # Delete from registry
     store.delete(uuid)
 
     return {

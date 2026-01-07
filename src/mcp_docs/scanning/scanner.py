@@ -3,7 +3,8 @@
 import asyncio
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from uuid import UUID
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -117,6 +118,7 @@ class DocumentScanner:
         self,
         root: DocumentRoot,
         enqueue_callback: Callable | None = None,
+        delete_callback: Callable[[UUID], Awaitable[None]] | None = None,
     ) -> ScanResult:
         """
         Scan a document root for changes.
@@ -124,6 +126,7 @@ class DocumentScanner:
         Args:
             root: DocumentRoot to scan
             enqueue_callback: Optional async callback to enqueue new/modified docs
+            delete_callback: Optional async callback when doc is marked deleted (for index cleanup)
 
         Returns:
             ScanResult with statistics
@@ -253,7 +256,7 @@ class DocumentScanner:
             if len(result.errors) < MAX_ERRORS:
                 result.errors.append(f"Error scanning directory: {e}")
 
-        # Mark deleted files
+        # Mark deleted files and clean up index
         for path_str, doc in existing_docs.items():
             if path_str not in seen_paths:
                 self.document_store.update(
@@ -261,6 +264,14 @@ class DocumentScanner:
                     status=DocumentStatus.DELETED,
                 )
                 result.files_deleted += 1
+
+                # Clean up vector index for deleted document
+                if delete_callback:
+                    try:
+                        await delete_callback(doc.id)
+                    except Exception as e:
+                        if len(result.errors) < MAX_ERRORS:
+                            result.errors.append(f"Failed to delete index for {path_str}: {e}")
 
         # Update last scan time
         self.document_store.update_root_scan(root.path, result.files_found)
@@ -270,12 +281,14 @@ class DocumentScanner:
     async def scan_all_roots(
         self,
         enqueue_callback: Callable | None = None,
+        delete_callback: Callable[[UUID], Awaitable[None]] | None = None,
     ) -> list[ScanResult]:
         """
         Scan all registered document roots.
 
         Args:
             enqueue_callback: Optional async callback to enqueue new/modified docs
+            delete_callback: Optional async callback when doc is marked deleted (for index cleanup)
 
         Returns:
             List of ScanResults for each root
@@ -288,7 +301,7 @@ class DocumentScanner:
                 continue
 
             try:
-                result = await self.scan_root(root, enqueue_callback)
+                result = await self.scan_root(root, enqueue_callback, delete_callback)
                 results.append(result)
             except Exception as e:
                 results.append(

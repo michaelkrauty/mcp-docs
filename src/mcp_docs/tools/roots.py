@@ -15,6 +15,7 @@ from vector_core.errors import ErrorCode, error_response
 
 from mcp_docs.app import mcp
 from mcp_docs.singletons import (
+    get_document_indexer,
     get_document_processor,
     get_document_scanner,
     get_document_store,
@@ -75,11 +76,19 @@ async def add_document_root(
         try:
             scanner = await get_document_scanner()
             processor = await get_document_processor()
+            indexer = await get_document_indexer()
 
             async def enqueue_doc(doc_id, file_path):
                 await processor.enqueue(doc_id, file_path)
 
-            scan_result = await scanner.scan_root(root, enqueue_callback=enqueue_doc)
+            async def delete_doc_index(doc_id):
+                await indexer.delete_document_index(doc_id)
+
+            scan_result = await scanner.scan_root(
+                root,
+                enqueue_callback=enqueue_doc,
+                delete_callback=delete_doc_index,
+            )
             result["scan_result"] = scan_result.to_dict()
         except Exception as e:
             result["scan_error"] = str(e)
@@ -186,11 +195,19 @@ async def scan_document_root(path: str) -> dict:
 
     scanner = await get_document_scanner()
     processor = await get_document_processor()
+    indexer = await get_document_indexer()
 
     async def enqueue_doc(doc_id, file_path):
         await processor.enqueue(doc_id, file_path)
 
-    result = await scanner.scan_root(root, enqueue_callback=enqueue_doc)
+    async def delete_doc_index(doc_id):
+        await indexer.delete_document_index(doc_id)
+
+    result = await scanner.scan_root(
+        root,
+        enqueue_callback=enqueue_doc,
+        delete_callback=delete_doc_index,
+    )
     return result.to_dict()
 
 
@@ -204,9 +221,16 @@ async def scan_all_roots() -> list[dict]:
     """
     scanner = await get_document_scanner()
     processor = await get_document_processor()
+    indexer = await get_document_indexer()
 
     async def enqueue_doc(doc_id, file_path):
         await processor.enqueue(doc_id, file_path)
 
-    results = await scanner.scan_all_roots(enqueue_callback=enqueue_doc)
+    async def delete_doc_index(doc_id):
+        await indexer.delete_document_index(doc_id)
+
+    results = await scanner.scan_all_roots(
+        enqueue_callback=enqueue_doc,
+        delete_callback=delete_doc_index,
+    )
     return [r.to_dict() for r in results]
