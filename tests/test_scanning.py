@@ -165,6 +165,76 @@ class TestDocumentScanner:
         assert len(enqueued) == 3
 
     @pytest.mark.asyncio
+    async def test_scan_root_delete_callback_on_deletion(
+        self, store: DocumentStore, document_root: Path
+    ) -> None:
+        """Regression test: delete_callback is invoked when files are deleted.
+
+        This tests the fix for the bug where deleted files remained in the
+        search index because the scanner wasn't cleaning up the vector index.
+        """
+        scanner = DocumentScanner(store, recursive=True)
+        root = store.add_root(str(document_root))
+
+        # Track documents registered during first scan
+        registered_docs = {}
+
+        async def enqueue_callback(doc_id, path):
+            registered_docs[str(path)] = doc_id  # Convert PosixPath to string
+
+        # First scan to register files
+        await scanner.scan_root(root, enqueue_callback=enqueue_callback)
+
+        # Find the doc_id for file1.txt
+        file1_path = str(document_root / "file1.txt")
+        assert file1_path in registered_docs
+        deleted_doc_id = registered_docs[file1_path]
+
+        # Delete a file
+        (document_root / "file1.txt").unlink()
+
+        # Track delete callbacks
+        deleted_ids = []
+
+        async def delete_callback(doc_id):
+            deleted_ids.append(doc_id)
+
+        # Second scan with delete_callback
+        result = await scanner.scan_root(root, delete_callback=delete_callback)
+
+        # Verify delete_callback was invoked with correct document ID
+        assert result.files_deleted == 1
+        assert len(deleted_ids) == 1
+        assert deleted_ids[0] == deleted_doc_id
+
+    @pytest.mark.asyncio
+    async def test_scan_root_delete_callback_multiple_deletions(
+        self, store: DocumentStore, document_root: Path
+    ) -> None:
+        """Regression test: delete_callback is invoked for each deleted file."""
+        scanner = DocumentScanner(store, recursive=True)
+        root = store.add_root(str(document_root))
+
+        # First scan to register files
+        await scanner.scan_root(root)
+
+        # Delete multiple files
+        (document_root / "file1.txt").unlink()
+        (document_root / "file2.md").unlink()
+
+        deleted_ids = []
+
+        async def delete_callback(doc_id):
+            deleted_ids.append(doc_id)
+
+        # Second scan with delete_callback
+        result = await scanner.scan_root(root, delete_callback=delete_callback)
+
+        # Verify delete_callback was invoked for both deleted files
+        assert result.files_deleted == 2
+        assert len(deleted_ids) == 2
+
+    @pytest.mark.asyncio
     async def test_scan_nonexistent_root(
         self, store: DocumentStore, temp_dir: Path
     ) -> None:
