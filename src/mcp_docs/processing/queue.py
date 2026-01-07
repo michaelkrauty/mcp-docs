@@ -196,6 +196,9 @@ class DocumentProcessor:
         This handles two cases where the server restarted:
         1. Documents waiting in queue (QUEUED) - never started processing
         2. Documents mid-processing (PROCESSING) - worker was interrupted
+
+        Note: We don't check if files exist here - let the extraction worker handle
+        that. Path.exists() can fail spuriously at startup due to filesystem timing.
         """
         try:
             # Query for documents with extraction_status=QUEUED or PROCESSING
@@ -214,15 +217,6 @@ class DocumentProcessor:
 
             for doc in orphaned:
                 path = Path(doc.path)
-                if not path.exists():
-                    # File was deleted - mark as failed
-                    logger.warning(f"Orphaned document file missing: {doc.path}")
-                    self.document_store.update(
-                        doc.id,
-                        extraction_status=ExtractionStatus.FAILED,
-                        extraction_error="File not found during re-enqueue",
-                    )
-                    continue
 
                 # Reset to QUEUED if it was mid-processing
                 self.document_store.update(
