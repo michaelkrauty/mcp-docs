@@ -105,10 +105,26 @@ class ContentExtractor:
                     f"Scanned PDF detected and OCR is disabled: {path.name}. "
                     "Enable OCR with DOCS_OCR_ENABLED=true."
                 )
-            # OCR not implemented in Phase 5
-            raise ExtractionError(
-                f"Scanned PDF detected: {path.name}. OCR support coming in Phase 11."
-            )
+
+            # Use vision LLM OCR
+            import asyncio
+
+            from mcp_docs.extraction.ocr import extract_scanned_pdf_cached
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop - create one
+                return asyncio.run(extract_scanned_pdf_cached(path))
+            else:
+                # Already in async context - need to run in new thread
+                import concurrent.futures
+
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(
+                        asyncio.run, extract_scanned_pdf_cached(path)
+                    )
+                    return future.result()
 
         return extract_pdf(path)
 

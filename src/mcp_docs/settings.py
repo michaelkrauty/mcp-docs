@@ -17,7 +17,18 @@ class DocsSettings(VectorCoreSettingsMixin, BaseSettings):
     # Extraction settings
     max_file_size_mb: int = 100  # Max file size to process
     ocr_enabled: bool = False  # OCR for scanned PDFs
-    ocr_language: str = "eng"
+    ocr_language: str = "eng"  # Tesseract language (future fallback)
+
+    # Vision LLM OCR settings
+    ocr_vision_url: str = "http://localhost:22222"  # OpenAI-compatible endpoint
+    ocr_vision_model: str = "olmocr-2-7b-1025"  # Vision model for OCR
+    ocr_dpi: int = 300  # DPI for PDF rendering (300 is good balance)
+    ocr_timeout: int = 180  # Per-page timeout in seconds
+    ocr_max_pages: int = 200  # Maximum pages to OCR per document
+    ocr_image_max_dimension: int = 1536  # Max image width/height for vision model
+    ocr_image_format: str = "jpeg"  # Image format: jpeg (smaller) or png (lossless)
+    ocr_jpeg_quality: int = 90  # JPEG quality (1-100) if using jpeg format
+    ocr_cache_enabled: bool = True  # Cache OCR results by content hash
 
     # Chunking thresholds
     max_chunk_chars: int = 80000  # ~20k tokens for Qwen3
