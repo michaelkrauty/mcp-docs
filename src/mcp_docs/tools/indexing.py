@@ -44,7 +44,7 @@ async def index_document(document_id: str) -> dict:
 
     if document.extraction_status != ExtractionStatus.EXTRACTED:
         return {
-            "error": f"Document not ready for indexing. Status: {document.extraction_status.value}",
+            "error": f"Document not ready for indexing. Status: {document.extraction_status}",
             "hint": "Wait for extraction to complete or use wait_for_document first.",
         }
 

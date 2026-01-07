@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
-from qdrant_client.models import FieldCondition, MatchValue, PointStruct
+from qdrant_client.models import FieldCondition, MatchValue, PayloadSchemaType, PointStruct
 from vector_core import (
     EmbeddingClient,
     GlobalVocabulary,
@@ -90,10 +90,16 @@ class DocumentIndexer:
             await self.storage.create_collection(self.collection_name)
             logger.info(f"Created collection: {self.collection_name}")
 
-        # Ensure payload indexes
+        # Ensure payload indexes for efficient filtering (idempotent)
         await self.storage.ensure_payload_indexes(
             self.collection_name,
-            payload_indexes=["type", "document_id", "content_hash", "doc_type", "tags"],
+            [
+                ("type", PayloadSchemaType.KEYWORD),
+                ("document_id", PayloadSchemaType.KEYWORD),
+                ("content_hash", PayloadSchemaType.KEYWORD),
+                ("doc_type", PayloadSchemaType.KEYWORD),
+                ("tags", PayloadSchemaType.KEYWORD),
+            ],
         )
 
     async def index_document(
@@ -141,7 +147,7 @@ class DocumentIndexer:
 
         # Upsert to Qdrant
         if points:
-            await self.storage.upsert(self.collection_name, points)
+            await self.storage.upsert_batch(self.collection_name, points)
             logger.info(f"Indexed document {document_id}: {len(points)} points")
 
         return len(points)
@@ -247,7 +253,7 @@ class DocumentIndexer:
                 points = await self._create_document_points(doc, content)
 
                 if points:
-                    await self.storage.upsert(self.collection_name, points)
+                    await self.storage.upsert_batch(self.collection_name, points)
                     total_points += len(points)
                     indexed_count += 1
                     logger.debug(f"Indexed {doc.filename}: {len(points)} points")
@@ -366,7 +372,7 @@ class DocumentIndexer:
             "content_hash": document.content_hash,
             "filename": document.filename,
             "path": document.path,
-            "doc_type": document.doc_type.value,
+            "doc_type": document.doc_type,  # Already string due to use_enum_values=True
             "title": document.title,
             "tags": document.tags,
             "doc_hash": self._doc_hash(document),
