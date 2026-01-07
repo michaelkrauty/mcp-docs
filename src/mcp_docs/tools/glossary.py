@@ -9,6 +9,17 @@ Tools:
 - delete_glossary_entry: Delete a glossary entry
 """
 
+import warnings
+
+from pydantic.json_schema import PydanticJsonSchemaWarning
+
+# Suppress warning for UNSET sentinel (intentionally non-JSON-serializable)
+warnings.filterwarnings(
+    "ignore",
+    category=PydanticJsonSchemaWarning,
+    message=".*UNSET.*",
+)
+
 from vector_core import UNSET, UnsetType, validate_limit
 
 from mcp_docs.app import mcp
