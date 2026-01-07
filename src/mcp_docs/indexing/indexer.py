@@ -148,6 +148,11 @@ class DocumentIndexer:
         # Upsert to Qdrant
         if points:
             await self.storage.upsert_batch(self.collection_name, points)
+            # Update status to indexed
+            self.document_store.update(
+                document_id,
+                extraction_status=ExtractionStatus.INDEXED,
+            )
             logger.info(f"Indexed document {document_id}: {len(points)} points")
 
         return len(points)
@@ -437,6 +442,92 @@ class DocumentIndexer:
             )
         except Exception as e:
             logger.warning(f"Failed to delete document points: {e}")
+
+    async def update_document_path_in_index(self, document_id: UUID, new_path: str) -> None:
+        """
+        Update path in vector index payloads for a document's chunks.
+
+        Args:
+            document_id: Document UUID
+            new_path: New file path
+        """
+        await self._ensure_components()
+        
+        try:
+            await self.storage.update_payload(
+                self.collection_name,
+                filter_conditions=[
+                    FieldCondition(key="document_id", match=MatchValue(value=str(document_id))),
+                ],
+                payload={"path": new_path}
+            )
+            logger.debug(f"Updated path in index for document {document_id}: {new_path}")
+        except Exception as e:
+            logger.warning(f"Failed to update path in index for document {document_id}: {e}")
+
+    async def update_paths_batch_in_index(self, old_prefix: str, new_prefix: str) -> int:
+        """
+        Batch update paths in vector index for directory moves.
+
+        Args:
+            old_prefix: Old path prefix to replace
+            new_prefix: New path prefix
+
+        Returns:
+            Number of points updated
+        """
+        await self._ensure_components()
+        
+        try:
+            # Get all points with paths starting with old_prefix
+            results = await self.storage.scroll_points(
+                self.collection_name,
+                filter_conditions=[
+                    FieldCondition(key="path", match=MatchValue(value=old_prefix + "*")),
+                ],
+                payload_fields=["path"],
+                limit=10000,
+            )
+            
+            if not results:
+                logger.debug(f"No points found with path prefix: {old_prefix}")
+                return 0
+            
+            # Update each point's path payload
+            updated_count = 0
+            for point_data in results:
+                if isinstance(point_data, dict) and "path" in point_data:
+                    current_path = point_data["path"]
+                    if current_path.startswith(old_prefix):
+                        new_path = new_prefix + current_path[len(old_prefix):]
+                        
+                        # Find the point ID for this path
+                        point_results = await self.storage.scroll_points(
+                            self.collection_name,
+                            filter_conditions=[
+                                FieldCondition(key="path", match=MatchValue(value=current_path)),
+                            ],
+                            payload_fields=["path"],
+                            limit=1000,
+                        )
+                        
+                        # Update all matching points
+                        for point in point_results:
+                            await self.storage.update_payload(
+                                self.collection_name,
+                                filter_conditions=[
+                                    FieldCondition(key="path", match=MatchValue(value=current_path)),
+                                ],
+                                payload={"path": new_path}
+                            )
+                            updated_count += 1
+            
+            logger.info(f"Updated {updated_count} points in index: {old_prefix} -> {new_prefix}")
+            return updated_count
+            
+        except Exception as e:
+            logger.error(f"Failed to batch update paths in index: {e}")
+            return 0
 
     async def close(self) -> None:
         """Close async resources."""

@@ -10,6 +10,7 @@ Each module handles a specific category of tools:
 - roots.py: Document root management
 - hashes.py: Hash verification for mcp-facts integration
 - glossary.py: Glossary tools (using vector-core GlossaryToolHelper)
+- filesystem.py: Filesystem management tools (move, create, rename, delete)
 
 Tools are registered via @mcp.tool() decorator when modules are imported.
 Import all modules in server.py to register all tools.
@@ -23,6 +24,7 @@ from mcp_docs.tools import indexing
 from mcp_docs.tools import roots
 from mcp_docs.tools import hashes
 from mcp_docs.tools import glossary
+from mcp_docs.tools import filesystem  # noqa: F401
 
 __all__ = [
     "documents",
@@ -32,4 +34,5 @@ __all__ = [
     "roots",
     "hashes",
     "glossary",
+    "filesystem",
 ]

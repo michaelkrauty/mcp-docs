@@ -743,3 +743,122 @@ class DocumentStore(ThreadSafeSQLiteStore):
         cursor = conn.execute("SELECT id FROM documents ORDER BY indexed_at DESC")
         for row in cursor.fetchall():
             yield self.read(UUID(row[0]))
+
+    def get_by_path(self, path: str) -> Document | None:
+        """
+        Get document by exact file path.
+
+        Args:
+            path: Exact file path
+
+        Returns:
+            Document if found, None otherwise
+        """
+        conn = self._get_conn()
+        cursor = conn.execute("SELECT id FROM documents WHERE path = ?", (path,))
+        row = cursor.fetchone()
+        if row:
+            return self.read(UUID(row[0]))
+        return None
+
+    def query_by_path_prefix(self, path_prefix: str, limit: int = 10000) -> list[DocumentSummary]:
+        """
+        Query documents whose paths start with prefix (for directory ops).
+
+        Args:
+            path_prefix: Path prefix to match
+            limit: Maximum results
+
+        Returns:
+            List of DocumentSummary objects
+        """
+        conn = self._get_conn()
+        cursor = conn.execute(
+            """
+            SELECT id, path, content_hash, filename, doc_type, title,
+                   size_bytes, status, extraction_status, indexed_at
+            FROM documents WHERE path LIKE ? ORDER BY path LIMIT ?
+            """,
+            (f"{path_prefix}%", limit),
+        )
+        
+        summaries = []
+        for row in cursor.fetchall():
+            doc_id = UUID(row[0])
+            tags = self._get_tags(conn, doc_id)
+            
+            summaries.append(
+                DocumentSummary(
+                    id=doc_id,
+                    path=row[1],
+                    content_hash=row[2],
+                    filename=row[3],
+                    doc_type=DocumentType(row[4]),
+                    title=row[5],
+                    size_bytes=row[6],
+                    tags=tags,
+                    status=DocumentStatus(row[7]),
+                    extraction_status=ExtractionStatus(row[8]),
+                    indexed_at=datetime.fromisoformat(row[9]),
+                )
+            )
+        
+        return summaries
+
+    def update_paths_batch(self, old_prefix: str, new_prefix: str) -> int:
+        """
+        Batch update document paths by replacing prefix. Returns count.
+
+        Args:
+            old_prefix: Old path prefix to replace
+            new_prefix: New path prefix
+
+        Returns:
+            Number of documents updated
+        """
+        conn = self._get_conn()
+        
+        # Use SQL REPLACE function to replace the prefix
+        cursor = conn.execute(
+            """
+            UPDATE documents 
+            SET path = ? || SUBSTR(path, ? + 1), indexed_at = ?
+            WHERE path LIKE ?
+            """,
+            (
+                new_prefix,
+                len(old_prefix),
+                datetime.now(UTC).isoformat(),
+                f"{old_prefix}%",
+            ),
+        )
+        
+        count = cursor.rowcount
+        conn.commit()
+        return count
+
+    def update_document_roots_batch(self, old_prefix: str, new_root: str) -> int:
+        """
+        Batch update document_root field for paths matching prefix.
+
+        Args:
+            old_prefix: Path prefix to match
+            new_root: New document root
+
+        Returns:
+            Number of documents updated
+        """
+        conn = self._get_conn()
+        
+        cursor = conn.execute(
+            """
+            UPDATE documents 
+            SET document_root = ?, indexed_at = ?
+            WHERE path LIKE ?
+            """,
+            (new_root, datetime.now(UTC).isoformat(), f"{old_prefix}%"),
+        )
+        
+        count = cursor.rowcount
+        conn.commit()
+        return count

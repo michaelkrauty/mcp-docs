@@ -86,6 +86,12 @@ EXPECTED_TOOLS = [
     "list_glossary",
     "update_glossary_entry",
     "delete_glossary_entry",
+    # Filesystem
+    "move_file",
+    "create_directory",
+    "rename_directory",
+    "move_directory",
+    "delete_directory",
 ]
 
 # Re-export tools for backward compatibility with tests
@@ -132,6 +138,13 @@ from mcp_docs.tools.glossary import (  # noqa: E402, F401
     list_glossary,
     update_glossary_entry,
     delete_glossary_entry,
+)
+from mcp_docs.tools.filesystem import (  # noqa: E402, F401
+    move_file,
+    create_directory,
+    rename_directory,
+    move_directory,
+    delete_directory,
 )
 
 

@@ -46,9 +46,17 @@ def get_document_store() -> DocumentStore:
 
 
 async def get_document_processor() -> DocumentProcessor:
-    """Get or create DocumentProcessor instance (async-safe)."""
+    """Get or create DocumentProcessor instance (async-safe).
+
+    Automatically configures the indexer for immediate indexing after extraction.
+    """
     async def _create_processor() -> DocumentProcessor:
-        processor = DocumentProcessor(document_store=get_document_store())
+        # Get indexer first so documents are indexed immediately after extraction
+        indexer = await get_document_indexer()
+        processor = DocumentProcessor(
+            document_store=get_document_store(),
+            indexer=indexer,
+        )
         await processor.start()
         return processor
 
