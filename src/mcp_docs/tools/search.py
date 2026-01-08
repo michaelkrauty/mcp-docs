@@ -2,14 +2,19 @@
 
 Tools:
 - search_documents: Search documents using hybrid semantic search
+- keyword_search: Search documents using exact keyword matching
 - find_similar_documents: Find documents similar to a given document
 - get_document_chunks: Get all indexed chunks for a document
 """
 
-from vector_core import parse_uuid_or_none, validate_limit
+from uuid import UUID
+
+from qdrant_client.models import FieldCondition, Filter, MatchText
+from vector_core import QdrantStorage, parse_uuid_or_none, validate_limit
 from vector_core.errors import ErrorCode, error_response
 
 from mcp_docs.app import mcp
+from mcp_docs.settings import settings
 from mcp_docs.singletons import get_search_engine
 
 
@@ -48,6 +53,109 @@ async def search_documents(
     )
 
     return [r.to_dict() for r in results]
+
+
+@mcp.tool()
+async def keyword_search(
+    keyword: str,
+    limit: int = 100,
+    doc_type: str | None = None,
+    search_filename: bool = True,
+    search_content: bool = True,
+) -> list[dict]:
+    """
+    Search documents using exact keyword matching.
+
+    Use this for proper nouns, specific terms, or exact phrase searches
+    where semantic search may miss results.
+
+    Args:
+        keyword: Exact keyword or phrase to search for (case-insensitive)
+        limit: Maximum results to return (default 100, max 1000)
+        doc_type: Filter by document type (pdf, docx, txt, md, etc.)
+        search_filename: Search in filenames (default True)
+        search_content: Search in document content (default True)
+
+    Returns:
+        List of matching documents with their paths
+    """
+    if not keyword or not keyword.strip():
+        return error_response(ErrorCode.VALIDATION_ERROR, "Keyword cannot be empty")
+
+    keyword = keyword.strip()
+    limit = min(max(1, limit), 1000)
+
+    storage = QdrantStorage()
+    try:
+        client = await storage.get_client()
+
+        # Build filter conditions for keyword matching
+        should_conditions = []
+        if search_content:
+            should_conditions.append(
+                FieldCondition(key="content", match=MatchText(text=keyword))
+            )
+        if search_filename:
+            should_conditions.append(
+                FieldCondition(key="filename", match=MatchText(text=keyword))
+            )
+
+        if not should_conditions:
+            return error_response(
+                ErrorCode.VALIDATION_ERROR,
+                "At least one of search_filename or search_content must be True",
+            )
+
+        # Build must conditions for additional filters
+        must_conditions = []
+        if doc_type:
+            must_conditions.append(
+                FieldCondition(key="doc_type", match={"value": doc_type})
+            )
+
+        # Construct the filter
+        filter_dict = {"should": should_conditions}
+        if must_conditions:
+            filter_dict["must"] = must_conditions
+
+        # Scroll through matching points
+        scroll_result = await client.scroll(
+            settings.collection_name,
+            scroll_filter=Filter(**filter_dict),
+            limit=limit * 2,  # Fetch more to account for duplicates
+            with_payload=True,
+        )
+
+        points, _ = scroll_result
+
+        # Deduplicate by document_id and build results
+        seen_docs: set[str] = set()
+        results = []
+
+        for point in points:
+            payload = point.payload or {}
+            doc_id = payload.get("document_id", "")
+
+            if doc_id in seen_docs:
+                continue
+            seen_docs.add(doc_id)
+
+            results.append({
+                "document_id": doc_id,
+                "filename": payload.get("filename", ""),
+                "path": payload.get("path", ""),
+                "doc_type": payload.get("doc_type", ""),
+                "title": payload.get("title"),
+                "tags": payload.get("tags", []),
+            })
+
+            if len(results) >= limit:
+                break
+
+        return results
+
+    finally:
+        await storage.close()
 
 
 @mcp.tool()

@@ -1,0 +1,11 @@
+{
+  "docs": {
+    "command": "uv",
+    "args": ["run", "--directory", "/home/kraut/.claude/mcp-servers/mcp-docs", "mcp-docs"],
+    "env": {
+      "DOCS_OCR_ENABLED": "true",
+      "DOCS_OCR_VISION_URL": "http://localhost:22222",
+      "DOCS_OCR_VISION_MODEL": "olmocr-2-7b-1025"
+    }
+  }
+}
