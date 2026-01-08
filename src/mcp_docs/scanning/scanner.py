@@ -42,6 +42,7 @@ class ScanResult:
     files_new: int = 0
     files_modified: int = 0
     files_deleted: int = 0
+    files_relocated: int = 0
     files_skipped: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -54,6 +55,7 @@ class ScanResult:
             "files_new": self.files_new,
             "files_modified": self.files_modified,
             "files_deleted": self.files_deleted,
+            "files_relocated": self.files_relocated,
             "files_skipped": self.files_skipped,
             "errors": self.errors,
         }
@@ -119,6 +121,7 @@ class DocumentScanner:
         root: DocumentRoot,
         enqueue_callback: Callable | None = None,
         delete_callback: Callable[[UUID], Awaitable[None]] | None = None,
+        relocate_callback: Callable[[UUID, str, str], Awaitable[None]] | None = None,
     ) -> ScanResult:
         """
         Scan a document root for changes.
@@ -127,6 +130,7 @@ class DocumentScanner:
             root: DocumentRoot to scan
             enqueue_callback: Optional async callback to enqueue new/modified docs
             delete_callback: Optional async callback when doc is marked deleted (for index cleanup)
+            relocate_callback: Optional async callback when doc is moved (doc_id, old_path, new_path)
 
         Returns:
             ScanResult with statistics
@@ -230,17 +234,38 @@ class DocumentScanner:
 
                             if enqueue_callback:
                                 await enqueue_callback(existing.id, file_path)
+                        elif existing_full and existing_full.status != DocumentStatus.ACTIVE:
+                            # File unchanged but was marked deleted/etc - restore to active
+                            self.document_store.update(
+                                existing.id,
+                                status=DocumentStatus.ACTIVE,
+                            )
                     else:
                         # New file - check if hash exists elsewhere
                         by_hash = self.document_store.get_by_hash(content_hash)
                         if by_hash:
-                            # Same content, different location - update path
+                            # Same content, different location - file was moved
+                            old_path = by_hash.path
                             self.document_store.update(
                                 by_hash.id,
                                 path=path_str,
                                 document_root=root.path,
                                 status=DocumentStatus.ACTIVE,
                             )
+                            result.files_relocated += 1
+
+                            # Mark old path as "seen" to prevent deletion
+                            seen_paths.add(old_path)
+
+                            # Update vector index with new path
+                            if relocate_callback:
+                                try:
+                                    await relocate_callback(by_hash.id, old_path, path_str)
+                                except Exception as e:
+                                    if len(result.errors) < MAX_ERRORS:
+                                        result.errors.append(
+                                            f"Failed to update index for relocated {path_str}: {e}"
+                                        )
                         else:
                             # Truly new file
                             doc = self.document_store.register(
@@ -287,6 +312,7 @@ class DocumentScanner:
         self,
         enqueue_callback: Callable | None = None,
         delete_callback: Callable[[UUID], Awaitable[None]] | None = None,
+        relocate_callback: Callable[[UUID, str, str], Awaitable[None]] | None = None,
     ) -> list[ScanResult]:
         """
         Scan all registered document roots.
@@ -294,6 +320,7 @@ class DocumentScanner:
         Args:
             enqueue_callback: Optional async callback to enqueue new/modified docs
             delete_callback: Optional async callback when doc is marked deleted (for index cleanup)
+            relocate_callback: Optional async callback when doc is moved (doc_id, old_path, new_path)
 
         Returns:
             List of ScanResults for each root
@@ -306,7 +333,9 @@ class DocumentScanner:
                 continue
 
             try:
-                result = await self.scan_root(root, enqueue_callback, delete_callback)
+                result = await self.scan_root(
+                    root, enqueue_callback, delete_callback, relocate_callback
+                )
                 results.append(result)
             except Exception as e:
                 results.append(

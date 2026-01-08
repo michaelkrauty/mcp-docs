@@ -84,10 +84,14 @@ async def add_document_root(
             async def delete_doc_index(doc_id):
                 await indexer.delete_document_index(doc_id)
 
+            async def relocate_doc_index(doc_id, old_path, new_path):
+                await indexer.update_document_path_in_index(doc_id, new_path)
+
             scan_result = await scanner.scan_root(
                 root,
                 enqueue_callback=enqueue_doc,
                 delete_callback=delete_doc_index,
+                relocate_callback=relocate_doc_index,
             )
             result["scan_result"] = scan_result.to_dict()
         except Exception as e:
@@ -203,10 +207,14 @@ async def scan_document_root(path: str) -> dict:
     async def delete_doc_index(doc_id):
         await indexer.delete_document_index(doc_id)
 
+    async def relocate_doc_index(doc_id, old_path, new_path):
+        await indexer.update_document_path_in_index(doc_id, new_path)
+
     result = await scanner.scan_root(
         root,
         enqueue_callback=enqueue_doc,
         delete_callback=delete_doc_index,
+        relocate_callback=relocate_doc_index,
     )
     return result.to_dict()
 
@@ -229,8 +237,12 @@ async def scan_all_roots() -> list[dict]:
     async def delete_doc_index(doc_id):
         await indexer.delete_document_index(doc_id)
 
+    async def relocate_doc_index(doc_id, old_path, new_path):
+        await indexer.update_document_path_in_index(doc_id, new_path)
+
     results = await scanner.scan_all_roots(
         enqueue_callback=enqueue_doc,
         delete_callback=delete_doc_index,
+        relocate_callback=relocate_doc_index,
     )
     return [r.to_dict() for r in results]
