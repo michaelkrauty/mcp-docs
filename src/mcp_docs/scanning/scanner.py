@@ -192,6 +192,11 @@ class DocumentScanner:
                     result.files_skipped += 1
                     continue
 
+                # Skip Office temp/lock files (e.g., ~$document.docx)
+                if file_path.name.startswith("~$"):
+                    result.files_skipped += 1
+                    continue
+
                 # Security: validate path is within root (prevents path traversal)
                 if not self._is_safe_path(file_path, root_path):
                     result.files_skipped += 1
