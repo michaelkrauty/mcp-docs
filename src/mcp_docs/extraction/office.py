@@ -1,10 +1,11 @@
-"""Office document extraction using python-docx and python-pptx."""
+"""Office document extraction using markitdown for text, python-docx/python-pptx for metadata."""
 
 from pathlib import Path
 
 from docx import Document as DocxDocument
 from pptx import Presentation
 
+from mcp_docs.extraction.markitdown_extractor import extract_text_markitdown
 from mcp_docs.models import ExtractedContent, ExtractionError
 
 
@@ -24,20 +25,8 @@ def extract_docx(path: Path) -> ExtractedContent:
     try:
         doc = DocxDocument(path)
 
-        # Extract text from paragraphs
-        paragraphs: list[str] = []
-        for para in doc.paragraphs:
-            if para.text.strip():
-                paragraphs.append(para.text)
-
-        # Also extract text from tables
-        for table in doc.tables:
-            for row in table.rows:
-                row_text = " | ".join(cell.text.strip() for cell in row.cells if cell.text.strip())
-                if row_text:
-                    paragraphs.append(row_text)
-
-        text = "\n\n".join(paragraphs)
+        # Extract text via markitdown (preserves tables, headings, lists)
+        text = extract_text_markitdown(path)
 
         # Get metadata from core properties
         title = None
@@ -72,8 +61,8 @@ def extract_doc(path: Path) -> ExtractedContent:
     """
     Extract text content from a DOC file (legacy Word format).
 
-    Note: This requires antiword or similar external tool.
-    For now, we raise an error suggesting conversion to DOCX.
+    Detects if the file is actually RTF format (common mislabeling)
+    and routes to markitdown. Otherwise raises an error.
 
     Args:
         path: Path to the DOC file
@@ -82,8 +71,27 @@ def extract_doc(path: Path) -> ExtractedContent:
         ExtractedContent
 
     Raises:
-        ExtractionError: Always, as DOC format is not directly supported
+        ExtractionError: If DOC format is not supported
     """
+    # Check if this is actually an RTF file disguised as .doc
+    # RTF files start with {\rtf
+    try:
+        with open(path, "rb") as f:
+            magic = f.read(5)
+        if magic.startswith(b"{\\rtf"):
+            # RTF content — markitdown handles it natively
+            text = extract_text_markitdown(path)
+            word_count = len(text.split()) if text else 0
+            return ExtractedContent(
+                text=text,
+                title=None,
+                page_count=None,
+                word_count=word_count,
+                metadata={},
+            )
+    except Exception:
+        pass  # Fall through to error
+
     raise ExtractionError(
         f"Legacy DOC format not directly supported: {path.name}. "
         "Please convert to DOCX format."
@@ -106,29 +114,8 @@ def extract_pptx(path: Path) -> ExtractedContent:
     try:
         prs = Presentation(path)
 
-        # Extract text from all slides
-        text_parts: list[str] = []
-
-        for slide_num, slide in enumerate(prs.slides, start=1):
-            slide_texts: list[str] = []
-
-            for shape in slide.shapes:
-                if hasattr(shape, "text") and shape.text.strip():
-                    slide_texts.append(shape.text.strip())
-
-                # Also extract from tables
-                if shape.has_table:
-                    for row in shape.table.rows:
-                        row_text = " | ".join(
-                            cell.text.strip() for cell in row.cells if cell.text.strip()
-                        )
-                        if row_text:
-                            slide_texts.append(row_text)
-
-            if slide_texts:
-                text_parts.append(f"--- Slide {slide_num} ---\n" + "\n".join(slide_texts))
-
-        text = "\n\n".join(text_parts)
+        # Extract text via markitdown (preserves slide structure)
+        text = extract_text_markitdown(path)
 
         # Get metadata from core properties
         title = None
@@ -163,8 +150,8 @@ def extract_ppt(path: Path) -> ExtractedContent:
     """
     Extract text content from a PPT file (legacy PowerPoint format).
 
-    Note: PPT format is not directly supported.
-    For now, we raise an error suggesting conversion to PPTX.
+    Tries markitdown first; falls back to an error since python-pptx
+    doesn't handle legacy .ppt.
 
     Args:
         path: Path to the PPT file
@@ -173,9 +160,47 @@ def extract_ppt(path: Path) -> ExtractedContent:
         ExtractedContent
 
     Raises:
-        ExtractionError: Always, as PPT format is not directly supported
+        ExtractionError: If extraction fails
     """
-    raise ExtractionError(
-        f"Legacy PPT format not directly supported: {path.name}. "
-        "Please convert to PPTX format."
-    )
+    try:
+        text = extract_text_markitdown(path)
+        word_count = len(text.split()) if text else 0
+        return ExtractedContent(
+            text=text,
+            title=None,
+            page_count=None,
+            word_count=word_count,
+            metadata={},
+        )
+    except Exception as e:
+        raise ExtractionError(
+            f"Legacy PPT format not directly supported: {path.name}. "
+            "Please convert to PPTX format."
+        ) from e
+
+
+def extract_xlsx(path: Path) -> ExtractedContent:
+    """
+    Extract content from an XLSX (or legacy XLS) spreadsheet.
+
+    Args:
+        path: Path to the spreadsheet file
+
+    Returns:
+        ExtractedContent with markdown table representation
+
+    Raises:
+        ExtractionError: If extraction fails
+    """
+    try:
+        text = extract_text_markitdown(path)
+        word_count = len(text.split()) if text else 0
+        return ExtractedContent(
+            text=text,
+            title=None,
+            page_count=None,
+            word_count=word_count,
+            metadata={},
+        )
+    except Exception as e:
+        raise ExtractionError(f"Failed to extract spreadsheet content: {e}") from e

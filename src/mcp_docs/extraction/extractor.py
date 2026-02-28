@@ -2,9 +2,23 @@
 
 from pathlib import Path
 
-from mcp_docs.extraction.office import extract_doc, extract_docx, extract_ppt, extract_pptx
+from mcp_docs.extraction.office import (
+    extract_doc,
+    extract_docx,
+    extract_ppt,
+    extract_pptx,
+    extract_xlsx,
+)
 from mcp_docs.extraction.pdf import extract_pdf, is_scanned_pdf
-from mcp_docs.extraction.text import extract_markdown, extract_text
+from mcp_docs.extraction.text import (
+    extract_csv,
+    extract_epub,
+    extract_html,
+    extract_markdown,
+    extract_rtf,
+    extract_text,
+    extract_xml,
+)
 from mcp_docs.models import DocumentType, ExtractedContent, ExtractionError
 from mcp_docs.settings import settings
 
@@ -79,6 +93,18 @@ class ContentExtractor:
             return extract_text(path)
         elif doc_type in (DocumentType.MD,):
             return extract_markdown(path)
+        elif doc_type == DocumentType.RTF:
+            return extract_rtf(path)
+        elif doc_type == DocumentType.HTML:
+            return extract_html(path)
+        elif doc_type == DocumentType.XLSX:
+            return extract_xlsx(path)
+        elif doc_type == DocumentType.CSV:
+            return extract_csv(path)
+        elif doc_type == DocumentType.EPUB:
+            return extract_epub(path)
+        elif doc_type == DocumentType.XML:
+            return extract_xml(path)
         elif doc_type == DocumentType.UNKNOWN:
             # Try as plain text
             return extract_text(path)
@@ -141,9 +167,17 @@ class ContentExtractor:
         supported = {
             DocumentType.PDF,
             DocumentType.DOCX,
+            DocumentType.DOC,
             DocumentType.PPTX,
+            DocumentType.PPT,
             DocumentType.TXT,
             DocumentType.MD,
+            DocumentType.RTF,
+            DocumentType.HTML,
+            DocumentType.XLSX,
+            DocumentType.CSV,
+            DocumentType.EPUB,
+            DocumentType.XML,
         }
         return doc_type in supported
 

@@ -1,7 +1,8 @@
-"""Plain text and markdown extraction."""
+"""Plain text, markdown, RTF, HTML, CSV, EPUB, and XML extraction."""
 
 from pathlib import Path
 
+from mcp_docs.extraction.markitdown_extractor import extract_text_markitdown
 from mcp_docs.models import ExtractedContent, ExtractionError
 
 
@@ -19,32 +20,15 @@ def extract_text(path: Path) -> ExtractedContent:
         ExtractionError: If extraction fails
     """
     try:
-        # Try common encodings
-        encodings = ["utf-8", "utf-8-sig", "latin-1", "cp1252"]
-        text = None
-
-        for encoding in encodings:
-            try:
-                text = path.read_text(encoding=encoding)
-                break
-            except UnicodeDecodeError:
-                continue
-
-        if text is None:
-            # Fallback with error replacement
-            text = path.read_text(encoding="utf-8", errors="replace")
-
-        # Calculate word count
+        text = extract_text_markitdown(path)
         word_count = len(text.split()) if text else 0
-
         return ExtractedContent(
             text=text,
-            title=None,  # Plain text has no metadata
+            title=None,
             page_count=None,
             word_count=word_count,
             metadata={},
         )
-
     except Exception as e:
         raise ExtractionError(f"Failed to extract text content: {e}") from e
 
@@ -65,19 +49,7 @@ def extract_markdown(path: Path) -> ExtractedContent:
         ExtractionError: If extraction fails
     """
     try:
-        # Try common encodings
-        encodings = ["utf-8", "utf-8-sig", "latin-1"]
-        text = None
-
-        for encoding in encodings:
-            try:
-                text = path.read_text(encoding=encoding)
-                break
-            except UnicodeDecodeError:
-                continue
-
-        if text is None:
-            text = path.read_text(encoding="utf-8", errors="replace")
+        text = extract_text_markitdown(path)
 
         # Try to extract title from first H1
         title = None
@@ -88,7 +60,6 @@ def extract_markdown(path: Path) -> ExtractedContent:
                 title = stripped[2:].strip()
                 break
 
-        # Calculate word count
         word_count = len(text.split()) if text else 0
 
         return ExtractedContent(
@@ -101,3 +72,138 @@ def extract_markdown(path: Path) -> ExtractedContent:
 
     except Exception as e:
         raise ExtractionError(f"Failed to extract markdown content: {e}") from e
+
+
+def extract_rtf(path: Path) -> ExtractedContent:
+    """
+    Extract content from an RTF file.
+
+    Args:
+        path: Path to the RTF file
+
+    Returns:
+        ExtractedContent with text and word count
+
+    Raises:
+        ExtractionError: If extraction fails
+    """
+    try:
+        text = extract_text_markitdown(path)
+        word_count = len(text.split()) if text else 0
+        return ExtractedContent(
+            text=text,
+            title=None,
+            page_count=None,
+            word_count=word_count,
+            metadata={},
+        )
+    except Exception as e:
+        raise ExtractionError(f"Failed to extract RTF content: {e}") from e
+
+
+def extract_html(path: Path) -> ExtractedContent:
+    """
+    Extract content from an HTML file.
+
+    Args:
+        path: Path to the HTML file
+
+    Returns:
+        ExtractedContent with markdown-converted text and word count
+
+    Raises:
+        ExtractionError: If extraction fails
+    """
+    try:
+        text = extract_text_markitdown(path)
+        word_count = len(text.split()) if text else 0
+        return ExtractedContent(
+            text=text,
+            title=None,
+            page_count=None,
+            word_count=word_count,
+            metadata={},
+        )
+    except Exception as e:
+        raise ExtractionError(f"Failed to extract HTML content: {e}") from e
+
+
+def extract_csv(path: Path) -> ExtractedContent:
+    """
+    Extract content from a CSV file as a markdown table.
+
+    Args:
+        path: Path to the CSV file
+
+    Returns:
+        ExtractedContent with markdown table representation
+
+    Raises:
+        ExtractionError: If extraction fails
+    """
+    try:
+        text = extract_text_markitdown(path)
+        word_count = len(text.split()) if text else 0
+        return ExtractedContent(
+            text=text,
+            title=None,
+            page_count=None,
+            word_count=word_count,
+            metadata={},
+        )
+    except Exception as e:
+        raise ExtractionError(f"Failed to extract CSV content: {e}") from e
+
+
+def extract_epub(path: Path) -> ExtractedContent:
+    """
+    Extract content from an EPUB file.
+
+    Args:
+        path: Path to the EPUB file
+
+    Returns:
+        ExtractedContent with text and word count
+
+    Raises:
+        ExtractionError: If extraction fails
+    """
+    try:
+        text = extract_text_markitdown(path)
+        word_count = len(text.split()) if text else 0
+        return ExtractedContent(
+            text=text,
+            title=None,
+            page_count=None,
+            word_count=word_count,
+            metadata={},
+        )
+    except Exception as e:
+        raise ExtractionError(f"Failed to extract EPUB content: {e}") from e
+
+
+def extract_xml(path: Path) -> ExtractedContent:
+    """
+    Extract content from an XML file.
+
+    Args:
+        path: Path to the XML file
+
+    Returns:
+        ExtractedContent with text and word count
+
+    Raises:
+        ExtractionError: If extraction fails
+    """
+    try:
+        text = extract_text_markitdown(path)
+        word_count = len(text.split()) if text else 0
+        return ExtractedContent(
+            text=text,
+            title=None,
+            page_count=None,
+            word_count=word_count,
+            metadata={},
+        )
+    except Exception as e:
+        raise ExtractionError(f"Failed to extract XML content: {e}") from e

@@ -20,6 +20,10 @@ class DocumentType(str, Enum):
     HTML = "html"
     RTF = "rtf"
     ODT = "odt"
+    XLSX = "xlsx"
+    CSV = "csv"
+    EPUB = "epub"
+    XML = "xml"
     UNKNOWN = "unknown"
 
     @classmethod
@@ -39,6 +43,11 @@ class DocumentType(str, Enum):
             "htm": cls.HTML,
             "rtf": cls.RTF,
             "odt": cls.ODT,
+            "xlsx": cls.XLSX,
+            "xls": cls.XLSX,
+            "csv": cls.CSV,
+            "epub": cls.EPUB,
+            "xml": cls.XML,
         }
         return mapping.get(ext, cls.UNKNOWN)
 

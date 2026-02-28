@@ -1,10 +1,11 @@
-"""PDF content extraction using pypdf."""
+"""PDF content extraction using pypdf for metadata and markitdown for text."""
 
 import logging
 from pathlib import Path
 
 from pypdf import PdfReader
 
+from mcp_docs.extraction.markitdown_extractor import extract_text_markitdown
 from mcp_docs.models import ExtractedContent, ExtractionError
 
 logger = logging.getLogger(__name__)
@@ -26,14 +27,8 @@ def extract_pdf(path: Path) -> ExtractedContent:
     try:
         reader = PdfReader(path)
 
-        # Extract text from all pages
-        text_parts: list[str] = []
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text_parts.append(page_text)
-
-        text = "\n\n".join(text_parts)
+        # Extract text via markitdown (preserves structure, tables, headings)
+        text = extract_text_markitdown(path)
 
         # Get metadata
         metadata = reader.metadata or {}

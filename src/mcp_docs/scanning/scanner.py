@@ -22,7 +22,16 @@ SUPPORTED_EXTENSIONS = {
     ".md",
     ".pdf",
     ".docx",
-    ".doc",  # Limited support for .doc
+    ".doc",
+    ".pptx",
+    ".rtf",
+    ".html",
+    ".htm",
+    ".xlsx",
+    ".xls",
+    ".csv",
+    ".epub",
+    ".xml",
 }
 
 # Maximum number of errors to collect (prevents memory exhaustion)
