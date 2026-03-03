@@ -167,8 +167,8 @@ def extract_ppt(path: Path) -> ExtractedContent:
         )
     except Exception as e:
         raise ExtractionError(
-            f"Legacy PPT format not directly supported: {path.name}. "
-            "Please convert to PPTX format."
+            f"Failed to extract PPT content from {path.name}: {e}. "
+            "If this is a legacy .ppt file, please convert to PPTX format."
         ) from e
 
 
