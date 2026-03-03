@@ -6,6 +6,7 @@ from docx import Document as DocxDocument
 from pptx import Presentation
 
 from mcp_docs.extraction.markitdown_extractor import extract_text_markitdown
+from mcp_docs.extraction.text import extract_rtf
 from mcp_docs.models import ExtractedContent, ExtractionError
 
 
@@ -80,9 +81,8 @@ def extract_doc(path: Path) -> ExtractedContent:
             magic = f.read(5)
         if magic.startswith(b"{\\rtf"):
             # RTF content — route to striprtf-based extractor
-            from mcp_docs.extraction.text import extract_rtf
             return extract_rtf(path)
-    except Exception:
+    except OSError:
         pass  # Fall through to error
 
     raise ExtractionError(

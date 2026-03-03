@@ -105,6 +105,11 @@ class ContentExtractor:
             return extract_epub(path)
         elif doc_type == DocumentType.XML:
             return extract_xml(path)
+        elif doc_type == DocumentType.ODT:
+            raise ExtractionError(
+                f"ODT format not directly supported: {path.name}. "
+                "Please convert to DOCX format."
+            )
         elif doc_type == DocumentType.UNKNOWN:
             # Try as plain text
             return extract_text(path)
