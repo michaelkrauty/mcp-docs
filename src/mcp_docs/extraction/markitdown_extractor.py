@@ -14,4 +14,4 @@ def _get_md() -> MarkItDown:
 def extract_text_markitdown(path: Path) -> str:
     """Convert a document to markdown text using MarkItDown."""
     result = _get_md().convert(str(path))
-    return result.text_content or ""
+    return result.markdown or ""

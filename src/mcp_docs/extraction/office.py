@@ -62,7 +62,7 @@ def extract_doc(path: Path) -> ExtractedContent:
     Extract text content from a DOC file (legacy Word format).
 
     Detects if the file is actually RTF format (common mislabeling)
-    and routes to markitdown. Otherwise raises an error.
+    and routes to the RTF extractor. Otherwise raises an error.
 
     Args:
         path: Path to the DOC file
@@ -79,16 +79,9 @@ def extract_doc(path: Path) -> ExtractedContent:
         with open(path, "rb") as f:
             magic = f.read(5)
         if magic.startswith(b"{\\rtf"):
-            # RTF content — markitdown handles it natively
-            text = extract_text_markitdown(path)
-            word_count = len(text.split()) if text else 0
-            return ExtractedContent(
-                text=text,
-                title=None,
-                page_count=None,
-                word_count=word_count,
-                metadata={},
-            )
+            # RTF content — route to striprtf-based extractor
+            from mcp_docs.extraction.text import extract_rtf
+            return extract_rtf(path)
     except Exception:
         pass  # Fall through to error
 

@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from striprtf.striprtf import rtf_to_text
+
 from mcp_docs.extraction.markitdown_extractor import extract_text_markitdown
 from mcp_docs.models import ExtractedContent, ExtractionError
 
@@ -78,6 +80,8 @@ def extract_rtf(path: Path) -> ExtractedContent:
     """
     Extract content from an RTF file.
 
+    Uses striprtf since markitdown has no RTF converter.
+
     Args:
         path: Path to the RTF file
 
@@ -88,7 +92,21 @@ def extract_rtf(path: Path) -> ExtractedContent:
         ExtractionError: If extraction fails
     """
     try:
-        text = extract_text_markitdown(path)
+        # Try common encodings for RTF files
+        encodings = ["utf-8", "utf-8-sig", "latin-1", "cp1252"]
+        raw_content = None
+
+        for encoding in encodings:
+            try:
+                raw_content = path.read_text(encoding=encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+
+        if raw_content is None:
+            raw_content = path.read_text(encoding="utf-8", errors="replace")
+
+        text = rtf_to_text(raw_content)
         word_count = len(text.split()) if text else 0
         return ExtractedContent(
             text=text,
