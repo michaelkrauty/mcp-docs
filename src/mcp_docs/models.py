@@ -24,6 +24,7 @@ class DocumentType(str, Enum):
     CSV = "csv"
     EPUB = "epub"
     XML = "xml"
+    IPYNB = "ipynb"
     UNKNOWN = "unknown"
 
     @classmethod
@@ -48,6 +49,7 @@ class DocumentType(str, Enum):
             "csv": cls.CSV,
             "epub": cls.EPUB,
             "xml": cls.XML,
+            "ipynb": cls.IPYNB,
         }
         return mapping.get(ext, cls.UNKNOWN)
 

@@ -54,6 +54,7 @@ class TestDocumentScanner:
         assert scanner.is_supported(Path("test.md"))
         assert scanner.is_supported(Path("test.pdf"))
         assert scanner.is_supported(Path("test.docx"))
+        assert scanner.is_supported(Path("notebook.ipynb"))
         assert scanner.is_supported(Path("test.TXT"))  # Case insensitive
 
         assert not scanner.is_supported(Path("test.png"))

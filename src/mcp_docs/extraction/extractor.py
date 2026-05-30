@@ -3,6 +3,7 @@
 import logging
 from pathlib import Path
 
+from mcp_docs.extraction.notebook import extract_ipynb
 from mcp_docs.extraction.office import (
     extract_doc,
     extract_docx,
@@ -88,6 +89,8 @@ class ContentExtractor:
             return extract_epub(path)
         elif doc_type == DocumentType.XML:
             return extract_xml(path)
+        elif doc_type == DocumentType.IPYNB:
+            return extract_ipynb(path)
         elif doc_type == DocumentType.ODT:
             raise ExtractionError(
                 f"ODT format not directly supported: {path.name}. "
@@ -191,6 +194,7 @@ class ContentExtractor:
             DocumentType.CSV,
             DocumentType.EPUB,
             DocumentType.XML,
+            DocumentType.IPYNB,
         }
         return doc_type in supported
 
