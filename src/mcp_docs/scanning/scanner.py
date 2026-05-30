@@ -33,6 +33,7 @@ SUPPORTED_EXTENSIONS = {
     ".csv",
     ".epub",
     ".xml",
+    ".ipynb",
 }
 
 # Maximum number of errors to collect (prevents memory exhaustion)

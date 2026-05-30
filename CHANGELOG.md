@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.0] - 2026-05-30
+
+### Added
+
+- **Jupyter notebook (`.ipynb`) support.** Notebooks are now a recognized document type: they are discovered during scanning, and a dedicated extractor parses the notebook JSON into searchable text — Markdown cells are kept as prose and code cells as fenced code blocks tagged with the notebook's language (from `language_info`/`kernelspec`). Cell outputs and raw cells are skipped (outputs are frequently large and non-textual), and the document title is taken from the first level-1 Markdown heading. Malformed notebooks raise a normal extraction error and are marked failed like any other unprocessable document.
+
 ## [1.0.4] - 2026-05-30
 
 ### Changed

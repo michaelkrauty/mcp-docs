@@ -1,11 +1,13 @@
 """Tests for document extraction."""
 
+import json
 import tempfile
 from pathlib import Path
 
 import pytest
 
 from mcp_docs.extraction import ContentExtractor, extract_content
+from mcp_docs.extraction.notebook import extract_ipynb
 from mcp_docs.extraction.text import extract_markdown, extract_text
 from mcp_docs.models import DocumentType, ExtractionError
 
@@ -252,3 +254,115 @@ class TestExtractContentFunction:
         content = extract_content(md_file)
 
         assert content.title == "Doc Title"
+
+
+class TestNotebookExtraction:
+    """Tests for Jupyter notebook (.ipynb) extraction."""
+
+    @staticmethod
+    def _write(path: Path, notebook: dict) -> None:
+        path.write_text(json.dumps(notebook), encoding="utf-8")
+
+    def test_extracts_markdown_prose_and_code(self, temp_dir: Path) -> None:
+        """Markdown becomes prose, code becomes fenced blocks tagged with the language."""
+        nb = {
+            "cells": [
+                {"cell_type": "markdown", "source": ["# Analysis\n", "\n", "Some **prose** here."]},
+                {"cell_type": "code", "source": ["import pandas as pd\n", "df = load()"]},
+            ],
+            "metadata": {"language_info": {"name": "python"}},
+            "nbformat": 4,
+        }
+        nb_file = temp_dir / "analysis.ipynb"
+        self._write(nb_file, nb)
+
+        content = extract_ipynb(nb_file)
+
+        assert content.title == "Analysis"  # from first H1
+        assert "Some **prose** here." in content.text
+        assert "```python" in content.text
+        assert "import pandas as pd" in content.text
+        assert content.metadata["language"] == "python"
+        assert content.metadata["cell_count"] == 2
+        assert content.page_count is None
+
+    def test_string_source_and_skips_outputs_and_raw_cells(self, temp_dir: Path) -> None:
+        """source may be a bare string; cell outputs and raw cells are excluded."""
+        nb = {
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "source": "print('hi')",
+                    "outputs": [{"output_type": "stream", "text": "OUTPUT_SHOULD_NOT_APPEAR"}],
+                },
+                {"cell_type": "raw", "source": ["RAW_SHOULD_NOT_APPEAR"]},
+                {"cell_type": "markdown", "source": ""},  # empty -> skipped
+            ],
+            "metadata": {},
+        }
+        nb_file = temp_dir / "mixed.ipynb"
+        self._write(nb_file, nb)
+
+        content = extract_ipynb(nb_file)
+
+        assert "print('hi')" in content.text  # bare-string source handled
+        assert "OUTPUT_SHOULD_NOT_APPEAR" not in content.text  # outputs excluded
+        assert "RAW_SHOULD_NOT_APPEAR" not in content.text  # raw cell excluded
+        assert content.title is None
+        assert "language" not in content.metadata  # no language metadata present
+
+    def test_language_falls_back_to_kernelspec(self, temp_dir: Path) -> None:
+        """When language_info is absent, the kernelspec language is used for fences."""
+        nb = {
+            "cells": [{"cell_type": "code", "source": "x <- 1"}],
+            "metadata": {"kernelspec": {"language": "r"}},
+        }
+        nb_file = temp_dir / "rlang.ipynb"
+        self._write(nb_file, nb)
+
+        content = extract_ipynb(nb_file)
+        assert "```r" in content.text
+
+    def test_no_cells_yields_empty_content(self, temp_dir: Path) -> None:
+        """A notebook with no cells extracts to empty text without error."""
+        nb_file = temp_dir / "empty.ipynb"
+        self._write(nb_file, {"metadata": {}, "nbformat": 4})
+
+        content = extract_ipynb(nb_file)
+        assert content.text == ""
+        assert content.word_count == 0
+        assert content.metadata["cell_count"] == 0
+
+    def test_invalid_json_raises(self, temp_dir: Path) -> None:
+        """A non-JSON file raises ExtractionError (caught by the processing queue)."""
+        nb_file = temp_dir / "bad.ipynb"
+        nb_file.write_text("{ not valid json", encoding="utf-8")
+        with pytest.raises(ExtractionError):
+            extract_ipynb(nb_file)
+
+    def test_json_array_is_not_a_notebook(self, temp_dir: Path) -> None:
+        """Valid JSON that is not an object raises ExtractionError."""
+        nb_file = temp_dir / "array.ipynb"
+        nb_file.write_text("[1, 2, 3]", encoding="utf-8")
+        with pytest.raises(ExtractionError):
+            extract_ipynb(nb_file)
+
+    def test_from_extension_maps_ipynb(self) -> None:
+        assert DocumentType.from_extension(".ipynb") == DocumentType.IPYNB
+        assert DocumentType.from_extension("ipynb") == DocumentType.IPYNB
+
+    def test_can_extract_ipynb(self) -> None:
+        assert ContentExtractor().can_extract(DocumentType.IPYNB) is True
+
+    def test_extract_dispatches_ipynb(self, temp_dir: Path) -> None:
+        """ContentExtractor.extract() auto-detects .ipynb and routes to the notebook extractor."""
+        nb = {
+            "cells": [{"cell_type": "markdown", "source": "# Title\n\nbody text"}],
+            "metadata": {},
+        }
+        nb_file = temp_dir / "dispatch.ipynb"
+        self._write(nb_file, nb)
+
+        content = ContentExtractor().extract(nb_file)
+        assert content.title == "Title"
+        assert "body text" in content.text
