@@ -366,3 +366,42 @@ class TestNotebookExtraction:
         content = ContentExtractor().extract(nb_file)
         assert content.title == "Title"
         assert "body text" in content.text
+
+    def test_nbformat_v3_worksheets_layout(self, temp_dir: Path) -> None:
+        """Legacy nbformat v3: cells nest under worksheets and code uses 'input'."""
+        nb = {
+            "nbformat": 3,
+            "worksheets": [
+                {
+                    "cells": [
+                        {
+                            "cell_type": "markdown",
+                            "source": ["# V3 Notebook\n", "\n", "legacy prose"],
+                        },
+                        {
+                            "cell_type": "code",
+                            "input": ["print('v3 code')"],
+                            "outputs": [{"output_type": "stream", "text": "V3_OUTPUT_HIDDEN"}],
+                        },
+                    ]
+                }
+            ],
+            "metadata": {"language_info": {"name": "python"}},
+        }
+        nb_file = temp_dir / "legacy.ipynb"
+        self._write(nb_file, nb)
+
+        content = extract_ipynb(nb_file)
+
+        assert content.title == "V3 Notebook"
+        assert "legacy prose" in content.text
+        assert "print('v3 code')" in content.text  # read from the v3 'input' field
+        assert "V3_OUTPUT_HIDDEN" not in content.text  # outputs still excluded
+        assert content.metadata["cell_count"] == 2
+
+    def test_pathologically_nested_json_raises(self, temp_dir: Path) -> None:
+        """Deeply nested JSON (RecursionError) surfaces as ExtractionError, not a crash."""
+        nb_file = temp_dir / "nested.ipynb"
+        nb_file.write_text("[" * 4000 + "]" * 4000, encoding="utf-8")
+        with pytest.raises(ExtractionError):
+            extract_ipynb(nb_file)

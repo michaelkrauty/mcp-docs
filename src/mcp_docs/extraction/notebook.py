@@ -8,13 +8,38 @@ from pathlib import Path
 from mcp_docs.models import ExtractedContent, ExtractionError
 
 
-def _cell_source(source: object) -> str:
-    """Normalize a notebook cell's ``source`` (a list of lines or a single string)."""
-    if isinstance(source, list):
-        return "".join(part for part in source if isinstance(part, str))
-    if isinstance(source, str):
-        return source
+def _cell_source(cell: dict) -> str:
+    """Text of a cell's ``source`` (nbformat v4) or ``input`` (legacy v3 code cells).
+
+    Either field may be a list of line strings or a single string.
+    """
+    raw = cell.get("source")
+    if raw is None:
+        raw = cell.get("input")  # nbformat v3 stores code under "input"
+    if isinstance(raw, list):
+        return "".join(part for part in raw if isinstance(part, str))
+    if isinstance(raw, str):
+        return raw
     return ""
+
+
+def _collect_cells(notebook: dict) -> list:
+    """Return the notebook's cells across nbformat versions.
+
+    nbformat v4 keeps them at the top level under ``cells``; the legacy v3 layout
+    nests them under ``worksheets[*].cells``.
+    """
+    cells = notebook.get("cells")
+    if isinstance(cells, list):
+        return cells
+    worksheets = notebook.get("worksheets")
+    if isinstance(worksheets, list):
+        collected: list = []
+        for sheet in worksheets:
+            if isinstance(sheet, dict) and isinstance(sheet.get("cells"), list):
+                collected.extend(sheet["cells"])
+        return collected
+    return []
 
 
 def _first_h1(markdown: str) -> str | None:
@@ -69,23 +94,21 @@ def extract_ipynb(path: Path) -> ExtractedContent:
 
     try:
         notebook = json.loads(raw)
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, RecursionError) as e:
         raise ExtractionError(f"Invalid notebook JSON in {path.name}: {e}") from e
 
     if not isinstance(notebook, dict):
         raise ExtractionError(f"Notebook {path.name} is not a JSON object")
 
     language = _notebook_language(notebook)
-    cells = notebook.get("cells")
-    if not isinstance(cells, list):
-        cells = []
+    cells = _collect_cells(notebook)
 
     parts: list[str] = []
     title: str | None = None
     for cell in cells:
         if not isinstance(cell, dict):
             continue
-        source = _cell_source(cell.get("source"))
+        source = _cell_source(cell)
         if not source.strip():
             continue
         cell_type = cell.get("cell_type")
