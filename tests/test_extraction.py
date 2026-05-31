@@ -323,6 +323,32 @@ class TestNotebookExtraction:
         content = extract_ipynb(nb_file)
         assert "```r" in content.text
 
+    @pytest.mark.parametrize(
+        ("kernel_name", "expected"),
+        [
+            ("python3", "python"),
+            ("python3.11", "python"),
+            ("julia-1.9", "julia"),
+            ("ir", "ir"),
+        ],
+    )
+    def test_language_falls_back_to_kernel_name(
+        self, temp_dir: Path, kernel_name: str, expected: str
+    ) -> None:
+        """With only a kernelspec name (no language_info/language), the language is
+        the leading alphabetic run of the kernel name (so versioned names like
+        "python3.11" and "julia-1.9" still map to "python"/"julia")."""
+        nb = {
+            "cells": [{"cell_type": "code", "source": "x = 1"}],
+            "metadata": {"kernelspec": {"name": kernel_name}},
+        }
+        nb_file = temp_dir / "kn.ipynb"
+        self._write(nb_file, nb)
+
+        content = extract_ipynb(nb_file)
+        assert f"```{expected}" in content.text
+        assert content.metadata["language"] == expected
+
     def test_no_cells_yields_empty_content(self, temp_dir: Path) -> None:
         """A notebook with no cells extracts to empty text without error."""
         nb_file = temp_dir / "empty.ipynb"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from itertools import takewhile
 from pathlib import Path
 
 from mcp_docs.models import ExtractedContent, ExtractionError
@@ -66,6 +67,15 @@ def _notebook_language(notebook: dict) -> str:
         language = kernelspec.get("language")
         if isinstance(language, str):
             return language
+        # Fall back to the kernel name, which is present even when language_info
+        # and kernelspec.language are absent — a very common notebook shape. Kernel
+        # names are conventionally "<language><version>" (e.g. "python3",
+        # "python3.11", "julia-1.9"), so use the leading alphabetic run as the
+        # language tag; fall back to the raw name if it doesn't start with a letter.
+        name = kernelspec.get("name")
+        if isinstance(name, str) and name:
+            prefix = "".join(takewhile(str.isalpha, name))
+            return prefix or name
     return ""
 
 

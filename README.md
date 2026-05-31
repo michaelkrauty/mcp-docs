@@ -16,7 +16,7 @@ MCP server for document management with multi-format extraction, semantic search
 Requires [vector-core](https://github.com/michaelkrauty/vector-core).
 
 ```bash
-pip install git+https://github.com/michaelkrauty/vector-core.git@v1.1.0
+pip install git+https://github.com/michaelkrauty/vector-core.git@v1.2.0
 pip install git+https://github.com/michaelkrauty/mcp-docs.git
 ```
 
@@ -58,7 +58,7 @@ claude mcp add docs \
 
 ## Features
 
-- **Multi-Format Extraction**: PDF, DOCX, PPTX, XLSX, CSV, EPUB, XML, TXT, Markdown, HTML, RTF
+- **Multi-Format Extraction**: PDF, DOCX, PPTX, XLSX, CSV, EPUB, XML, TXT, Markdown, Jupyter (`.ipynb`), HTML, RTF
 - **Directory Scanning**: Register root directories for automatic discovery
 - **Semantic Search**: Hybrid dense + sparse vector search via Qdrant
 - **Keyword Search**: Exact keyword/phrase matching in filenames and content
@@ -152,6 +152,7 @@ claude mcp add docs \
 | EPUB | `.epub` | E-book text extraction via MarkItDown |
 | XML | `.xml` | XML content extraction via MarkItDown |
 | Text | `.txt`, `.md` | Direct text / markdown with title extraction |
+| Jupyter | `.ipynb` | Markdown cells as prose, code cells as language-tagged fenced blocks; outputs and raw cells skipped; title from first H1 |
 | HTML | `.html`, `.htm` | Markdown conversion via MarkItDown |
 | RTF | `.rtf` | Rich text via striprtf |
 | OpenDocument | `.odt` | Not supported; raises error advising conversion to DOCX |
