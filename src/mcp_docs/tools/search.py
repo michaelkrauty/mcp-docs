@@ -62,7 +62,7 @@ async def keyword_search(
     doc_type: str | None = None,
     search_filename: bool = True,
     search_content: bool = True,
-) -> list[dict]:
+) -> list[dict] | dict:
     """
     Search documents using exact keyword matching.
 
@@ -80,7 +80,13 @@ async def keyword_search(
         List of matching documents with their paths
     """
     if not keyword or not keyword.strip():
-        return error_response(ErrorCode.VALIDATION_ERROR, "Keyword cannot be empty")
+        return error_response(ErrorCode.VALIDATION_FAILED, "Keyword cannot be empty")
+
+    if not search_filename and not search_content:
+        return error_response(
+            ErrorCode.VALIDATION_FAILED,
+            "At least one of search_filename or search_content must be True",
+        )
 
     keyword = keyword.strip()
     limit = min(max(1, limit), 1000)
@@ -98,12 +104,6 @@ async def keyword_search(
     if search_filename:
         should_conditions.append(
             FieldCondition(key="filename", match=MatchText(text=keyword))
-        )
-
-    if not should_conditions:
-        return error_response(
-            ErrorCode.VALIDATION_ERROR,
-            "At least one of search_filename or search_content must be True",
         )
 
     # Build must conditions for additional filters

@@ -2,7 +2,7 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -505,3 +505,38 @@ class TestBatchVerify:
         # All should have status 'missing'
         for item in result:
             assert item["status"] == "missing"
+
+
+class TestKeywordSearchValidation:
+    """keyword_search returns a structured error on bad input instead of crashing.
+
+    Both guards previously referenced ``ErrorCode.VALIDATION_ERROR``, which does
+    not exist on vector-core's ``ErrorCode`` enum, so the validation paths raised
+    ``AttributeError`` rather than returning a friendly error.
+    """
+
+    @pytest.mark.asyncio
+    async def test_empty_keyword_returns_validation_error(self) -> None:
+        """An empty keyword returns a validation error without touching services."""
+        from mcp_docs.tools.search import keyword_search
+
+        result = await keyword_search("")
+
+        assert result["error_code"] == "validation_failed"
+        assert "empty" in result["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_no_search_field_returns_validation_error(self) -> None:
+        """Disabling both filename and content search returns a validation error
+        without initializing the search engine."""
+        from mcp_docs.tools.search import keyword_search
+
+        with patch(
+            "mcp_docs.tools.search.get_search_engine", new=AsyncMock()
+        ) as mock_get_engine:
+            result = await keyword_search(
+                "term", search_filename=False, search_content=False
+            )
+
+        assert result["error_code"] == "validation_failed"
+        mock_get_engine.assert_not_called()

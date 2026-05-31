@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.1.1] - 2026-05-30
+
+### Fixed
+
+- **`keyword_search` no longer crashes on invalid input.** Both validation guards referenced `ErrorCode.VALIDATION_ERROR`, which does not exist on vector-core's `ErrorCode` enum, so an empty keyword (or disabling both `search_filename` and `search_content`) raised `AttributeError` instead of returning the intended structured error. They now use `ErrorCode.VALIDATION_FAILED`, and the "at least one search field" guard runs before the search engine is initialized so it can never be masked by a service error. Covered by regression tests.
+- **Jupyter code-fence language is now inferred from the kernel name.** `.ipynb` notebooks whose metadata has only `kernelspec.name` (e.g. `"python3"`) — a very common shape with no `language_info` and no `kernelspec.language` — previously produced untagged code fences. The extractor now falls back to the leading alphabetic run of the kernel name, so `python3`, `python3.11`, and `julia-1.9` tag fences as `python`/`python`/`julia`.
+
+### Changed
+
+- Bumped the `vector-core` dependency to `v1.2.0`.
+
+### Documentation
+
+- Documented Jupyter notebook (`.ipynb`) support in the README (features list and Supported Formats table) — it shipped in v1.1.0 but was previously undocumented.
+
 ## [1.1.0] - 2026-05-30
 
 ### Added
