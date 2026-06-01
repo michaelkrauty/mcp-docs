@@ -20,12 +20,18 @@ def validate_doc_type(doc_type: str | None) -> tuple[str | None, dict | None]:
     is passed straight to the SQL/Qdrant filter, silently matching zero
     documents — indistinguishable to the caller from "no documents of this
     type." Validating up front turns that into a clear, actionable error.
+
+    Surrounding whitespace is stripped; ``None`` or a blank/whitespace-only
+    value is treated as "no filter".
     """
-    if not doc_type:
-        # None or empty string: treated as "no filter" by every call site.
+    if doc_type is None:
+        return None, None
+    normalized = doc_type.strip().lower()
+    if not normalized:
+        # Blank or whitespace-only: treated as "no filter" by every call site.
         return None, None
     try:
-        return DocumentType(doc_type.lower()).value, None
+        return DocumentType(normalized).value, None
     except ValueError:
         valid = ", ".join(t.value for t in DocumentType)
         return None, error_response(

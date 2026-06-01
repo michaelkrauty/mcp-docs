@@ -44,6 +44,20 @@ class TestValidateDocType:
         assert "pyhton" in err["message"]  # names the offending value
         assert "pdf" in err["message"]  # lists the valid values
 
+    def test_unknown_is_a_valid_type(self):
+        # "unknown" is a real stored DocumentType (for unrecognized extensions).
+        value, err = validate_doc_type("unknown")
+        assert value == "unknown"
+        assert err is None
+
+    def test_whitespace_only_is_no_filter(self):
+        assert validate_doc_type("   ") == (None, None)
+
+    def test_surrounding_whitespace_is_stripped(self):
+        value, err = validate_doc_type("  PDF ")
+        assert value == "pdf"
+        assert err is None
+
 
 class TestToolsRejectInvalidDocType:
     """Each tool fails fast on an invalid doc_type instead of silently
@@ -74,6 +88,17 @@ class TestToolsRejectInvalidDocType:
         assert is_error_response(result)
         assert result["error_code"] == ErrorCode.INVALID_INPUT.value
         get_engine.assert_not_called()
+
+    async def test_search_documents_passes_normalized_doc_type_to_engine(self):
+        # A valid but wrong-case doc_type must reach the engine normalized.
+        engine = AsyncMock()
+        engine.search.return_value = []
+        with patch(
+            "mcp_docs.tools.search.get_search_engine", new=AsyncMock(return_value=engine)
+        ):
+            result = await search_documents(query="q", doc_type="PDF")
+        assert result == []
+        assert engine.search.call_args.kwargs["doc_type"] == "pdf"
 
 
 class TestIndexDocumentErrorShape:
