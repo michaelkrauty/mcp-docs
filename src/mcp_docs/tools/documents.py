@@ -24,6 +24,7 @@ from mcp_docs.singletons import (
     get_integrity_manager,
 )
 from mcp_docs.storage.database import compute_file_hash
+from mcp_docs.tools._validation import validate_doc_type
 
 logger = logging.getLogger(__name__)
 
@@ -276,11 +277,15 @@ async def list_documents(
                 "Valid values: queued, processing, extracted, failed, indexed",
             )
 
+    doc_type_value, doc_type_error = validate_doc_type(doc_type)
+    if doc_type_error is not None:
+        return doc_type_error
+
     summaries = store.list_summaries(
         tags=tags,
         status=status_enum,
         extraction_status=extraction_enum,
-        doc_type=doc_type,
+        doc_type=doc_type_value,
         document_root=document_root,
         limit=limit,
     )
