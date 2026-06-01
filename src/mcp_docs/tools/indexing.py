@@ -45,10 +45,11 @@ async def index_document(document_id: str) -> dict:
 
     indexable_statuses = {ExtractionStatus.EXTRACTED, ExtractionStatus.INDEXED}
     if document.extraction_status not in indexable_statuses:
-        return {
-            "error": f"Document not ready for indexing. Status: {document.extraction_status}",
-            "hint": "Wait for extraction to complete or use wait_for_document first.",
-        }
+        return error_response(
+            ErrorCode.CONFLICT,
+            f"Document not ready for indexing (status: {document.extraction_status}). "
+            "Wait for extraction to complete, or call wait_for_document first.",
+        )
 
     try:
         indexer = await get_document_indexer()

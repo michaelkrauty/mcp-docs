@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.1.2] - 2026-05-31
+
+### Fixed
+
+- **`doc_type` filter now fails fast on an invalid value instead of silently matching nothing.** In `list_documents`, `search_documents`, and `keyword_search`, a typo'd or wrong-case `doc_type` (e.g. `"pyhton"`, `"PDF"`) was passed straight to the SQL/Qdrant filter and quietly returned an empty result — indistinguishable from "no documents of this type." The value is now validated against the known document types (returning a clear `INVALID_INPUT` error listing the valid values) and normalized to its canonical lowercase form, so a correct-but-wrong-case type such as `"PDF"` now matches as expected. This mirrors the existing `status`/`extraction_status` validation in `list_documents`.
+- **`index_document` returns a structured error response when a document isn't ready to index.** It previously returned a bare `{"error": ...}` dict with no `error_code`, so callers using `is_error_response()` treated the failure as success; it now returns a proper `CONFLICT` error like every other failure branch.
+
+### Changed
+
+- `keyword_search`'s `doc_type` filter now uses `MatchValue` (matching the search engine) instead of a raw dict, for type-correct Qdrant filtering.
+
 ## [1.1.1] - 2026-05-30
 
 ### Fixed

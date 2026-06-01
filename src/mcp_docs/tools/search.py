@@ -8,13 +8,14 @@ Tools:
 """
 
 
-from qdrant_client.models import FieldCondition, Filter, MatchText
+from qdrant_client.models import FieldCondition, Filter, MatchText, MatchValue
 from vector_core import parse_uuid_or_none, validate_limit
 from vector_core.errors import ErrorCode, error_response
 
 from mcp_docs.app import mcp
 from mcp_docs.settings import settings
 from mcp_docs.singletons import get_search_engine
+from mcp_docs.tools._validation import validate_doc_type
 
 
 @mcp.tool()
@@ -24,7 +25,7 @@ async def search_documents(
     doc_type: str | None = None,
     tags: list[str] | None = None,
     include_chunks: bool = True,
-) -> list[dict]:
+) -> list[dict] | dict:
     """
     Search documents using hybrid semantic search.
 
@@ -39,15 +40,20 @@ async def search_documents(
             If False, only match whole documents.
 
     Returns:
-        List of search results with relevance scores
+        List of search results with relevance scores, or an error dict on
+        invalid input.
     """
+    doc_type_value, doc_type_error = validate_doc_type(doc_type)
+    if doc_type_error is not None:
+        return doc_type_error
+
     engine = await get_search_engine()
     limit = validate_limit(limit)
 
     results = await engine.search(
         query=query,
         limit=limit,
-        doc_type=doc_type,
+        doc_type=doc_type_value,
         tags=tags,
         include_chunks=include_chunks,
     )
@@ -88,6 +94,10 @@ async def keyword_search(
             "At least one of search_filename or search_content must be True",
         )
 
+    doc_type_value, doc_type_error = validate_doc_type(doc_type)
+    if doc_type_error is not None:
+        return doc_type_error
+
     keyword = keyword.strip()
     limit = min(max(1, limit), 1000)
 
@@ -108,9 +118,9 @@ async def keyword_search(
 
     # Build must conditions for additional filters
     must_conditions = []
-    if doc_type:
+    if doc_type_value:
         must_conditions.append(
-            FieldCondition(key="doc_type", match={"value": doc_type})
+            FieldCondition(key="doc_type", match=MatchValue(value=doc_type_value))
         )
 
     # Construct the filter
