@@ -131,6 +131,11 @@ async def update_glossary_entry(
         Updated entry as dict
     """
     helper = await get_glossary_helper()
+    # vector-core >= 1.2.1 rejects blank domain values, but this tool's
+    # documented way to clear the domain is "". Translate blank to None
+    # (the helper's "clear" value) to keep that contract working.
+    if isinstance(domain, str) and not domain.strip():
+        domain = None
     return await helper.update_entry(
         term_or_id, term, expansion, definition, domain, aliases
     )
