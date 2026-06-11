@@ -22,7 +22,7 @@ def _mock_helper() -> AsyncMock:
 
 class TestUpdateGlossaryEntryDomainClear:
     @pytest.mark.asyncio
-    async def test_empty_string_domain_is_translated_to_none(self):
+    async def test_empty_string_domain_is_translated_to_none(self) -> None:
         helper = _mock_helper()
         with patch(
             "mcp_docs.tools.glossary.get_glossary_helper",
@@ -34,7 +34,7 @@ class TestUpdateGlossaryEntryDomainClear:
         assert args[4] is None  # domain positional arg
 
     @pytest.mark.asyncio
-    async def test_whitespace_domain_is_translated_to_none(self):
+    async def test_whitespace_domain_is_translated_to_none(self) -> None:
         helper = _mock_helper()
         with patch(
             "mcp_docs.tools.glossary.get_glossary_helper",
@@ -46,7 +46,7 @@ class TestUpdateGlossaryEntryDomainClear:
         assert args[4] is None
 
     @pytest.mark.asyncio
-    async def test_unset_domain_is_passed_through(self):
+    async def test_unset_domain_is_passed_through(self) -> None:
         helper = _mock_helper()
         with patch(
             "mcp_docs.tools.glossary.get_glossary_helper",
@@ -58,7 +58,7 @@ class TestUpdateGlossaryEntryDomainClear:
         assert args[4] is UNSET
 
     @pytest.mark.asyncio
-    async def test_real_domain_value_is_passed_through(self):
+    async def test_real_domain_value_is_passed_through(self) -> None:
         helper = _mock_helper()
         with patch(
             "mcp_docs.tools.glossary.get_glossary_helper",
