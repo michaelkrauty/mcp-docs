@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.3] - 2026-06-11
+
+### Changed
+
+- Bumped the `vector-core` dependency to `v1.2.1`. This is a fix release in the shared library; the change most relevant to mcp-docs is per-batch progress callbacks in `embed_all`, so indexing progress is reported as each batch completes rather than only at the end. The remaining fixes (FactStore batch-read ordering, glossary `entry_hash` staleness on alias updates, and blank/duplicate-input validation in the shared glossary tool helper) are inherited shared-library hygiene.
+
 ## [1.1.2] - 2026-05-31
 
 ### Fixed
