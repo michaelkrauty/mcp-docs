@@ -17,6 +17,17 @@ from mcp_docs.settings import settings
 logger = logging.getLogger(__name__)
 
 
+def _normalize_tag_filters(tags: list[str]) -> list[str]:
+    """Normalize tag filters to match how tags are stored.
+
+    DocumentStore lowercases and strips every tag on write, so a filter
+    must do the same or a wrong-case tag (e.g. "Finance") silently
+    matches nothing. Blank entries are dropped rather than matched.
+    """
+    normalized = (tag.lower().strip() for tag in tags)
+    return [tag for tag in normalized if tag]
+
+
 @dataclass
 class SearchResult:
     """A single search result."""
@@ -150,7 +161,7 @@ class DocumentSearchEngine:
             )
 
         if tags:
-            for tag in tags:
+            for tag in _normalize_tag_filters(tags):
                 filter_conditions.append(
                     FieldCondition(key="tags", match=MatchValue(value=tag))
                 )

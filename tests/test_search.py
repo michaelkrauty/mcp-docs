@@ -266,3 +266,21 @@ class TestDocumentSearchEngineGetChunks:
         assert chunks[0].content == "A"
         assert chunks[1].content == "B"
         assert chunks[2].content == "C"
+
+
+class TestTagFilterNormalization:
+    """Tag filters must be normalized like stored tags (lowercase+strip)."""
+
+    def test_mixed_case_and_whitespace_normalized(self):
+        from mcp_docs.search.engine import _normalize_tag_filters
+
+        assert _normalize_tag_filters(["Finance", "  Tax  ", "ok"]) == [
+            "finance",
+            "tax",
+            "ok",
+        ]
+
+    def test_blank_entries_dropped(self):
+        from mcp_docs.search.engine import _normalize_tag_filters
+
+        assert _normalize_tag_filters(["", "   ", "real"]) == ["real"]

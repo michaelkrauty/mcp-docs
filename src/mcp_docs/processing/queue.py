@@ -736,13 +736,15 @@ class DocumentProcessor:
                 task.path,
             )
 
-            # Update document with extracted content
+            # Update document with extracted content; clear any stale
+            # extraction_error from a previously failed attempt.
             self.document_store.update(
                 task.document_id,
                 title=content.title,
                 page_count=content.page_count,
                 word_count=content.word_count,
                 extraction_status=ExtractionStatus.EXTRACTED,
+                extraction_error=None,
             )
 
             # Automatically index if indexer is configured

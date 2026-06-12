@@ -7,7 +7,7 @@ from uuid import UUID
 
 import pytest
 
-from mcp_docs.models import DocumentStatus, DocumentType, ExtractionStatus
+from mcp_docs.models import Document, DocumentStatus, DocumentType, ExtractionStatus
 from mcp_docs.storage.database import DocumentStore, compute_file_hash
 
 
@@ -367,3 +367,100 @@ class TestConcurrentRegistration:
         # Should be same document with updated path
         assert doc2.id == original_id
         assert doc2.path == str(file_b)
+
+
+class TestBatchPathUpdates:
+    """Prefix updates must stop at the directory boundary and treat LIKE
+    wildcards in directory names literally."""
+
+    def _register_at(self, store: DocumentStore, temp_dir: Path, rel: str) -> Document:
+        file_path = temp_dir / rel
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(f"unique content for {rel}")
+        return store.register(file_path)
+
+    def test_rename_does_not_touch_sibling_with_shared_prefix(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        doc_a = self._register_at(store, temp_dir, "docs/a.txt")
+        doc_b = self._register_at(store, temp_dir, "docs2/b.txt")
+
+        count = store.update_paths_batch(
+            str(temp_dir / "docs"), str(temp_dir / "archive")
+        )
+
+        assert count == 1
+        assert store.read(doc_a.id).path == str(temp_dir / "archive" / "a.txt")
+        assert store.read(doc_b.id).path == str(temp_dir / "docs2" / "b.txt")
+
+    def test_underscore_in_directory_name_is_literal(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        doc_a = self._register_at(store, temp_dir, "my_dir/a.txt")
+        doc_b = self._register_at(store, temp_dir, "myxdir/b.txt")
+
+        count = store.update_paths_batch(
+            str(temp_dir / "my_dir"), str(temp_dir / "renamed")
+        )
+
+        assert count == 1
+        assert store.read(doc_a.id).path == str(temp_dir / "renamed" / "a.txt")
+        assert store.read(doc_b.id).path == str(temp_dir / "myxdir" / "b.txt")
+
+    def test_trailing_slash_on_prefix_is_accepted(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        doc_a = self._register_at(store, temp_dir, "docs/a.txt")
+
+        count = store.update_paths_batch(
+            str(temp_dir / "docs") + "/", str(temp_dir / "archive") + "/"
+        )
+
+        assert count == 1
+        assert store.read(doc_a.id).path == str(temp_dir / "archive" / "a.txt")
+
+    def test_document_roots_batch_respects_boundary(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        doc_a = self._register_at(store, temp_dir, "docs/a.txt")
+        doc_b = self._register_at(store, temp_dir, "docs2/b.txt")
+
+        count = store.update_document_roots_batch(
+            str(temp_dir / "docs"), "/new/root"
+        )
+
+        assert count == 1
+        assert store.read(doc_a.id).document_root == "/new/root"
+        assert store.read(doc_b.id).document_root != "/new/root"
+
+
+class TestExtractionErrorSentinel:
+    """extraction_error=None clears the stored error; UNSET leaves it."""
+
+    def test_none_clears_stale_error(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        doc = store.register(sample_file)
+        store.update(
+            doc.id,
+            extraction_status=ExtractionStatus.FAILED,
+            extraction_error="boom",
+        )
+
+        store.update(doc.id, extraction_error=None)
+
+        assert store.read(doc.id).extraction_error is None
+
+    def test_unset_default_preserves_error(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        doc = store.register(sample_file)
+        store.update(
+            doc.id,
+            extraction_status=ExtractionStatus.FAILED,
+            extraction_error="boom",
+        )
+
+        store.update(doc.id, title="new title")
+
+        assert store.read(doc.id).extraction_error == "boom"

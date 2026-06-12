@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from vector_core.utils.hashing import compute_file_hash
+from vector_core.utils.sentinel import UNSET, UnsetType, is_set
 from vector_core.utils.sqlite import SQLiteConfig, ThreadSafeSQLiteStore
 
 from mcp_docs.models import (
@@ -23,6 +24,16 @@ from mcp_docs.models import (
 from mcp_docs.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _escape_like(text: str) -> str:
+    r"""Escape SQL LIKE wildcards so a path prefix matches literally.
+
+    "%" and "_" are pattern characters in LIKE; "_" is common in directory
+    names, so an unescaped prefix silently matches sibling directories.
+    Pair with `ESCAPE '\'` in the query.
+    """
+    return text.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
 
 
 class DocumentStore(ThreadSafeSQLiteStore):
@@ -279,7 +290,7 @@ class DocumentStore(ThreadSafeSQLiteStore):
         page_count: int | None = None,
         word_count: int | None = None,
         extraction_status: ExtractionStatus | None = None,
-        extraction_error: str | None = None,
+        extraction_error: str | None | UnsetType = UNSET,
         status: DocumentStatus | None = None,
         path: str | None = None,
         content_hash: str | None = None,
@@ -294,7 +305,9 @@ class DocumentStore(ThreadSafeSQLiteStore):
             page_count: New page count
             word_count: New word count
             extraction_status: New extraction status
-            extraction_error: Extraction error message
+            extraction_error: Extraction error message (pass None to clear
+                a stale error, e.g. when re-queueing or after a successful
+                re-extraction; leave UNSET to keep the current value)
             status: New document status
             path: New path (for relocations)
             content_hash: New content hash (when file modified)
@@ -330,7 +343,7 @@ class DocumentStore(ThreadSafeSQLiteStore):
             updates.append("extraction_status = ?")
             params.append(extraction_status.value)
 
-        if extraction_error is not None:
+        if is_set(extraction_error):
             updates.append("extraction_error = ?")
             params.append(extraction_error)
 
@@ -820,29 +833,35 @@ class DocumentStore(ThreadSafeSQLiteStore):
 
     def update_paths_batch(self, old_prefix: str, new_prefix: str) -> int:
         """
-        Batch update document paths by replacing prefix. Returns count.
+        Batch update document paths by replacing a directory prefix.
+
+        Only documents strictly under the directory (old_prefix + "/") are
+        updated: the match is anchored at the path-separator boundary and
+        LIKE wildcards in the prefix are escaped, so renaming "/data/docs"
+        cannot touch "/data/docs2", and "_" in directory names is literal.
 
         Args:
-            old_prefix: Old path prefix to replace
-            new_prefix: New path prefix
+            old_prefix: Old directory path (with or without trailing "/")
+            new_prefix: New directory path
 
         Returns:
             Number of documents updated
         """
         conn = self._get_conn()
+        old_dir = old_prefix.rstrip("/")
+        new_dir = new_prefix.rstrip("/")
 
-        # Use SQL REPLACE function to replace the prefix
         cursor = conn.execute(
-            """
+            r"""
             UPDATE documents
             SET path = ? || SUBSTR(path, ? + 1), indexed_at = ?
-            WHERE path LIKE ?
+            WHERE path LIKE ? ESCAPE '\'
             """,
             (
-                new_prefix,
-                len(old_prefix),
+                new_dir,
+                len(old_dir),
                 datetime.now(UTC).isoformat(),
-                f"{old_prefix}%",
+                _escape_like(old_dir) + "/%",
             ),
         )
 
@@ -852,10 +871,12 @@ class DocumentStore(ThreadSafeSQLiteStore):
 
     def update_document_roots_batch(self, old_prefix: str, new_root: str) -> int:
         """
-        Batch update document_root field for paths matching prefix.
+        Batch update document_root for documents under a directory.
+
+        Matching is anchored and escaped exactly like update_paths_batch.
 
         Args:
-            old_prefix: Path prefix to match
+            old_prefix: Directory path to match (with or without trailing "/")
             new_root: New document root
 
         Returns:
@@ -864,12 +885,16 @@ class DocumentStore(ThreadSafeSQLiteStore):
         conn = self._get_conn()
 
         cursor = conn.execute(
-            """
+            r"""
             UPDATE documents
             SET document_root = ?, indexed_at = ?
-            WHERE path LIKE ?
+            WHERE path LIKE ? ESCAPE '\'
             """,
-            (new_root, datetime.now(UTC).isoformat(), f"{old_prefix}%"),
+            (
+                new_root,
+                datetime.now(UTC).isoformat(),
+                _escape_like(old_prefix.rstrip("/")) + "/%",
+            ),
         )
 
         count = cursor.rowcount
