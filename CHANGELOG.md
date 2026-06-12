@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.8] - 2026-06-12
+
+### Changed
+
+- Bump vector-core to v1.2.5 (case-insensitive `find_connections` type filters; symmetric `get_metadata` string round-trip — neither path is used by mcp-docs).
+
 ## [1.1.7] - 2026-06-12
 
 ### Fixed
