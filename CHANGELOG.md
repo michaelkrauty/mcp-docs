@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.6] - 2026-06-12
+
+### Changed
+
+- **Bumped `vector-core` to `v1.2.4`.** Pure dependency hygiene: v1.2.4 makes `FactStore.create()`/`update()` raise `ValueError` on blank subject/predicate/object/type fields and out-of-range confidence values before any database access. mcp-docs exposes no fact tools — facts live in mcp-notes; docs uses the glossary helper and document store — so no behavior of this server changes. This keeps the pin current with the shared library.
+
 ## [1.1.5] - 2026-06-12
 
 ### Fixed
