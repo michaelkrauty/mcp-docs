@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from vector_core.utils.hashing import compute_file_hash
+from vector_core.utils.sentinel import UNSET, UnsetType, is_set
 from vector_core.utils.sqlite import SQLiteConfig, ThreadSafeSQLiteStore
 
 from mcp_docs.models import (
@@ -279,7 +280,7 @@ class DocumentStore(ThreadSafeSQLiteStore):
         page_count: int | None = None,
         word_count: int | None = None,
         extraction_status: ExtractionStatus | None = None,
-        extraction_error: str | None = None,
+        extraction_error: str | None | UnsetType = UNSET,
         status: DocumentStatus | None = None,
         path: str | None = None,
         content_hash: str | None = None,
@@ -294,7 +295,9 @@ class DocumentStore(ThreadSafeSQLiteStore):
             page_count: New page count
             word_count: New word count
             extraction_status: New extraction status
-            extraction_error: Extraction error message
+            extraction_error: Extraction error message (pass None to clear
+                a stale error, e.g. when re-queueing or after a successful
+                re-extraction; leave UNSET to keep the current value)
             status: New document status
             path: New path (for relocations)
             content_hash: New content hash (when file modified)
@@ -330,7 +333,7 @@ class DocumentStore(ThreadSafeSQLiteStore):
             updates.append("extraction_status = ?")
             params.append(extraction_status.value)
 
-        if extraction_error is not None:
+        if is_set(extraction_error):
             updates.append("extraction_error = ?")
             params.append(extraction_error)
 
@@ -820,29 +823,39 @@ class DocumentStore(ThreadSafeSQLiteStore):
 
     def update_paths_batch(self, old_prefix: str, new_prefix: str) -> int:
         """
-        Batch update document paths by replacing prefix. Returns count.
+        Batch update document paths by replacing a directory prefix.
+
+        Only documents strictly under the directory (old_prefix + "/") are
+        updated. The match is an exact, case-sensitive prefix comparison
+        anchored at the path-separator boundary — LIKE is unsuitable here
+        because "%"/"_" are wildcards AND SQLite LIKE is case-insensitive
+        for ASCII, any of which lets renaming "/data/docs" silently
+        corrupt siblings like "/data/docs2", "/data/my_dir"-vs-"myxdir",
+        or "/data/Docs".
 
         Args:
-            old_prefix: Old path prefix to replace
-            new_prefix: New path prefix
+            old_prefix: Old directory path (with or without trailing "/")
+            new_prefix: New directory path
 
         Returns:
             Number of documents updated
         """
         conn = self._get_conn()
+        old_dir = old_prefix.rstrip("/")
+        new_dir = new_prefix.rstrip("/")
 
-        # Use SQL REPLACE function to replace the prefix
         cursor = conn.execute(
             """
             UPDATE documents
             SET path = ? || SUBSTR(path, ? + 1), indexed_at = ?
-            WHERE path LIKE ?
+            WHERE SUBSTR(path, 1, ?) = ?
             """,
             (
-                new_prefix,
-                len(old_prefix),
+                new_dir,
+                len(old_dir),
                 datetime.now(UTC).isoformat(),
-                f"{old_prefix}%",
+                len(old_dir) + 1,
+                old_dir + "/",
             ),
         )
 
@@ -852,24 +865,33 @@ class DocumentStore(ThreadSafeSQLiteStore):
 
     def update_document_roots_batch(self, old_prefix: str, new_root: str) -> int:
         """
-        Batch update document_root field for paths matching prefix.
+        Batch update document_root for documents under a directory.
+
+        Matching is the same anchored, case-sensitive prefix comparison as
+        update_paths_batch.
 
         Args:
-            old_prefix: Path prefix to match
+            old_prefix: Directory path to match (with or without trailing "/")
             new_root: New document root
 
         Returns:
             Number of documents updated
         """
         conn = self._get_conn()
+        old_dir = old_prefix.rstrip("/")
 
         cursor = conn.execute(
             """
             UPDATE documents
             SET document_root = ?, indexed_at = ?
-            WHERE path LIKE ?
+            WHERE SUBSTR(path, 1, ?) = ?
             """,
-            (new_root, datetime.now(UTC).isoformat(), f"{old_prefix}%"),
+            (
+                new_root,
+                datetime.now(UTC).isoformat(),
+                len(old_dir) + 1,
+                old_dir + "/",
+            ),
         )
 
         count = cursor.rowcount

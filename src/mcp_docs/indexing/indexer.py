@@ -475,12 +475,16 @@ class DocumentIndexer:
                 logger.debug("No points found in collection")
                 return 0
 
-            # Collect unique old paths that match the prefix
+            # Collect unique old paths strictly under the directory. The
+            # boundary slash keeps a rename of ".../docs" from rewriting
+            # points under a sibling like ".../docs2".
+            old_dir = old_prefix.rstrip("/") + "/"
+            new_dir = new_prefix.rstrip("/") + "/"
             old_paths: set[str] = set()
             for point_data in results:
                 if isinstance(point_data, dict):
                     current_path = point_data.get("path", "")
-                    if current_path.startswith(old_prefix):
+                    if current_path.startswith(old_dir):
                         old_paths.add(current_path)
 
             if not old_paths:
@@ -490,7 +494,7 @@ class DocumentIndexer:
             # Update each unique path with a single bulk update call
             updated_count = 0
             for old_path in old_paths:
-                new_path = new_prefix + old_path[len(old_prefix):]
+                new_path = new_dir + old_path[len(old_dir):]
                 await self.storage.update_payload(
                     self.collection_name,
                     filter_conditions=[

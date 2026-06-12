@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.7] - 2026-06-12
+
+### Fixed
+
+- `rename_directory` and `move_directory` no longer corrupt the recorded paths of documents in *sibling* directories that share a name prefix. The batch path update matched with an unanchored, unescaped SQL `LIKE`, so renaming `/data/docs` also rewrote paths under `/data/docs2`, `_` in a directory name acted as a single-character wildcard (renaming `/data/my_dir` rewrote `/data/myxdir`), and — because SQLite `LIKE` is case-insensitive for ASCII — case-only siblings like `/data/Docs` were rewritten too. Matching is now an exact, case-sensitive prefix comparison anchored at the directory boundary, in both the SQLite store (paths and document roots) and the Qdrant index path updater.
+- `search_documents(tags=...)` now normalizes tag filters (lowercase, strip) to match how tags are stored. Previously a wrong-case tag like `"Finance"` silently returned no results from search while the same filter worked in `list_documents`, whose SQL path already normalized.
+- A stale `extraction_error` no longer survives successful re-extraction. The re-queue path's explicit `extraction_error=None` was silently ignored because `DocumentStore.update()` used `None` as its "not provided" sentinel; the parameter now uses an explicit unset sentinel so `None` clears the stored error, and the successful-extraction path clears it as well.
+
 ## [1.1.6] - 2026-06-12
 
 ### Changed
