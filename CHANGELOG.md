@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.4] - 2026-06-12
+
+### Fixed
+
+- **`update_glossary_entry` can no longer destroy an entry's aliases when a new alias collides with another entry.** Bumped `vector-core` to `v1.2.2`, which makes `GlossaryStore.create()`/`update()` validate aliases — cross-entry collisions and case-normalized intra-list duplicates — *before* any row is written, raising `TermExistsError` with the store left fully unchanged (plus a rollback-on-error backstop). This matters for mcp-docs because the glossary tools preflight blank and intra-list-duplicate aliases themselves but rely on the store to catch cross-entry collisions: before this bump, an `update_glossary_entry` call whose new alias collided with *another* entry's term or alias returned a clean "duplicate" error while a partial mutation — the target entry's aliases already deleted — could still be committed later on the long-lived connection. That reachable data-loss path is now closed; the duplicate error genuinely means nothing changed.
+
 ## [1.1.3] - 2026-06-11
 
 ### Fixed
