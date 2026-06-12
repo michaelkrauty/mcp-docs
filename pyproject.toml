@@ -1,6 +1,6 @@
 [project]
 name = "mcp-docs"
-version = "1.1.4"
+version = "1.1.5"
 description = "MCP server for document management with vector search"
 readme = "README.md"
 authors = [
@@ -12,7 +12,7 @@ dependencies = [
     "mcp~=1.25.0",
     "pydantic~=2.0",
     "pydantic-settings~=2.0",
-    "vector-core @ git+https://github.com/michaelkrauty/vector-core.git@v1.2.2",
+    "vector-core @ git+https://github.com/michaelkrauty/vector-core.git@v1.2.3",
     # Extraction dependencies
     "pypdf~=5.0",
     "python-docx~=1.0",
@@ -60,7 +60,7 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 
 [tool.uv.sources]
-vector-core = { git = "https://github.com/michaelkrauty/vector-core", tag = "v1.2.2" }
+vector-core = { git = "https://github.com/michaelkrauty/vector-core", tag = "v1.2.3" }
 
 [tool.mypy]
 python_version = "3.12"

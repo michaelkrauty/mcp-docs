@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.5] - 2026-06-12
+
+### Fixed
+
+- **Case-only term renames and renaming a term to one of the entry's own aliases now work in `update_glossary_entry`.** Bumped `vector-core` to `v1.2.3`, which fixes the term-uniqueness check in `GlossaryStore.update()` to exclude the entry being updated. Previously the check matched the entry's own rows, so renaming a term to a different casing of itself (e.g. `"USAF"` → `"Usaf"`) or promoting one of the entry's own aliases to be the term raised a spurious `TermExistsError`. Since `update_glossary_entry` delegates term renames to the store, both kinds of rename were impossible through the docs MCP tools; they now succeed as expected.
+
 ## [1.1.4] - 2026-06-12
 
 ### Fixed
