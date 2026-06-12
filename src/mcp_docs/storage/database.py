@@ -26,16 +26,6 @@ from mcp_docs.settings import settings
 logger = logging.getLogger(__name__)
 
 
-def _escape_like(text: str) -> str:
-    r"""Escape SQL LIKE wildcards so a path prefix matches literally.
-
-    "%" and "_" are pattern characters in LIKE; "_" is common in directory
-    names, so an unescaped prefix silently matches sibling directories.
-    Pair with `ESCAPE '\'` in the query.
-    """
-    return text.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
-
-
 class DocumentStore(ThreadSafeSQLiteStore):
     """
     SQLite-based document storage with thread-safe operations.
@@ -836,9 +826,12 @@ class DocumentStore(ThreadSafeSQLiteStore):
         Batch update document paths by replacing a directory prefix.
 
         Only documents strictly under the directory (old_prefix + "/") are
-        updated: the match is anchored at the path-separator boundary and
-        LIKE wildcards in the prefix are escaped, so renaming "/data/docs"
-        cannot touch "/data/docs2", and "_" in directory names is literal.
+        updated. The match is an exact, case-sensitive prefix comparison
+        anchored at the path-separator boundary — LIKE is unsuitable here
+        because "%"/"_" are wildcards AND SQLite LIKE is case-insensitive
+        for ASCII, any of which lets renaming "/data/docs" silently
+        corrupt siblings like "/data/docs2", "/data/my_dir"-vs-"myxdir",
+        or "/data/Docs".
 
         Args:
             old_prefix: Old directory path (with or without trailing "/")
@@ -852,16 +845,17 @@ class DocumentStore(ThreadSafeSQLiteStore):
         new_dir = new_prefix.rstrip("/")
 
         cursor = conn.execute(
-            r"""
+            """
             UPDATE documents
             SET path = ? || SUBSTR(path, ? + 1), indexed_at = ?
-            WHERE path LIKE ? ESCAPE '\'
+            WHERE SUBSTR(path, 1, ?) = ?
             """,
             (
                 new_dir,
                 len(old_dir),
                 datetime.now(UTC).isoformat(),
-                _escape_like(old_dir) + "/%",
+                len(old_dir) + 1,
+                old_dir + "/",
             ),
         )
 
@@ -873,7 +867,8 @@ class DocumentStore(ThreadSafeSQLiteStore):
         """
         Batch update document_root for documents under a directory.
 
-        Matching is anchored and escaped exactly like update_paths_batch.
+        Matching is the same anchored, case-sensitive prefix comparison as
+        update_paths_batch.
 
         Args:
             old_prefix: Directory path to match (with or without trailing "/")
@@ -883,17 +878,19 @@ class DocumentStore(ThreadSafeSQLiteStore):
             Number of documents updated
         """
         conn = self._get_conn()
+        old_dir = old_prefix.rstrip("/")
 
         cursor = conn.execute(
-            r"""
+            """
             UPDATE documents
             SET document_root = ?, indexed_at = ?
-            WHERE path LIKE ? ESCAPE '\'
+            WHERE SUBSTR(path, 1, ?) = ?
             """,
             (
                 new_root,
                 datetime.now(UTC).isoformat(),
-                _escape_like(old_prefix.rstrip("/")) + "/%",
+                len(old_dir) + 1,
+                old_dir + "/",
             ),
         )
 

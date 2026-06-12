@@ -433,6 +433,21 @@ class TestBatchPathUpdates:
         assert store.read(doc_a.id).document_root == "/new/root"
         assert store.read(doc_b.id).document_root != "/new/root"
 
+    def test_case_only_sibling_directory_untouched(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        """SQLite LIKE is case-insensitive; the prefix match must not be."""
+        doc_a = self._register_at(store, temp_dir, "docs/a.txt")
+        doc_b = self._register_at(store, temp_dir, "Docs/b.txt")
+
+        count = store.update_paths_batch(
+            str(temp_dir / "docs"), str(temp_dir / "archive")
+        )
+
+        assert count == 1
+        assert store.read(doc_a.id).path == str(temp_dir / "archive" / "a.txt")
+        assert store.read(doc_b.id).path == str(temp_dir / "Docs" / "b.txt")
+
 
 class TestExtractionErrorSentinel:
     """extraction_error=None clears the stored error; UNSET leaves it."""
