@@ -16,7 +16,7 @@ MCP server for document management with multi-format extraction, semantic search
 Requires [vector-core](https://github.com/michaelkrauty/vector-core).
 
 ```bash
-pip install git+https://github.com/michaelkrauty/vector-core.git@v1.2.2
+pip install git+https://github.com/michaelkrauty/vector-core.git@v1.2.3
 pip install git+https://github.com/michaelkrauty/mcp-docs.git
 ```
 
