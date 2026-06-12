@@ -913,7 +913,7 @@ wheels = [
 
 [[package]]
 name = "mcp-docs"
-version = "1.1.5"
+version = "1.1.6"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -963,7 +963,7 @@ requires-dist = [
     { name = "python-pptx", specifier = "~=1.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
     { name = "striprtf", specifier = "~=0.0.26" },
-    { name = "vector-core", git = "https://github.com/michaelkrauty/vector-core?tag=v1.2.3" },
+    { name = "vector-core", git = "https://github.com/michaelkrauty/vector-core?tag=v1.2.4" },
 ]
 provides-extras = ["ocr", "dev"]
 
@@ -1971,8 +1971,8 @@ wheels = [
 
 [[package]]
 name = "vector-core"
-version = "1.2.3"
-source = { git = "https://github.com/michaelkrauty/vector-core?tag=v1.2.3#d2af66fecae5da06143b7fc70255b8fbd6c60d64" }
+version = "1.2.4"
+source = { git = "https://github.com/michaelkrauty/vector-core?tag=v1.2.4#a62c737d0e7faa94b69535899af6db96daadaa2f" }
 dependencies = [
     { name = "httpx" },
     { name = "pathspec" },
