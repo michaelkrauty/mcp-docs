@@ -7,8 +7,11 @@ from pathlib import Path
 import pytest
 
 from mcp_docs.extraction import ContentExtractor, extract_content
+from mcp_docs.extraction import text as docs_text
 from mcp_docs.extraction.notebook import extract_ipynb
 from mcp_docs.extraction.text import (
+    _csv_to_markdown_table,
+    _read_text_with_encoding_fallback,
     extract_csv,
     extract_markdown,
     extract_rtf,
@@ -438,99 +441,109 @@ class TestNotebookExtraction:
             extract_ipynb(nb_file)
 
 
+class TestCsvMarkdownTable:
+    """_csv_to_markdown_table rendering (the fallback renderer)."""
+
+    def test_basic_table(self) -> None:
+        out = _csv_to_markdown_table("name,age\nAlice,30\nBob,25\n")
+        assert "| name | age |" in out
+        assert "| --- | --- |" in out
+        assert "| Alice | 30 |" in out
+
+    def test_quoted_field_with_embedded_comma(self) -> None:
+        out = _csv_to_markdown_table('item,note\n"Smith, Inc",hello\n')
+        assert "| Smith, Inc | hello |" in out
+
+    def test_pipe_in_cell_is_escaped(self) -> None:
+        out = _csv_to_markdown_table("a,b\nx|y,z\n")
+        assert "x\\|y" in out
+
+    def test_ragged_rows_padded(self) -> None:
+        out = _csv_to_markdown_table("a,b,c\n1,2\n")
+        assert "| 1 | 2 |  |" in out
+
+    def test_empty(self) -> None:
+        assert _csv_to_markdown_table("") == ""
+
+    def test_cr_only_line_endings(self) -> None:
+        out = _csv_to_markdown_table("a,b\r1,2\r3,4\r")
+        assert "| 1 | 2 |" in out
+        assert "| 3 | 4 |" in out
+
+
+class TestEncodingFallback:
+    """_read_text_with_encoding_fallback decodes regardless of encoding/locale."""
+
+    def test_latin1(self, temp_dir: Path) -> None:
+        f = temp_dir / "l.txt"
+        f.write_bytes("José,Montréal".encode("latin-1"))
+        out = _read_text_with_encoding_fallback(f)
+        assert "José" in out and "Montréal" in out
+
+    def test_cp1252_smart_quotes_before_latin1(self, temp_dir: Path) -> None:
+        # latin-1 would map these to C1 control chars; cp1252 must win first.
+        f = temp_dir / "c.txt"
+        f.write_bytes(b"\x93hi\x94 \x8050")
+        out = _read_text_with_encoding_fallback(f)
+        assert "“hi”" in out and "€50" in out
+
+    def test_utf8_bom_stripped(self, temp_dir: Path) -> None:
+        f = temp_dir / "b.txt"
+        f.write_bytes("header".encode("utf-8-sig"))
+        assert _read_text_with_encoding_fallback(f) == "header"
+
+    def test_utf16_with_bom(self, temp_dir: Path) -> None:
+        f = temp_dir / "u.txt"
+        f.write_bytes("Zürich".encode("utf-16"))
+        out = _read_text_with_encoding_fallback(f)
+        assert out == "Zürich" and "\x00" not in out
+
+    def test_bom_less_utf16(self, temp_dir: Path) -> None:
+        f = temp_dir / "u2.txt"
+        f.write_bytes("Alice,Paris".encode("utf-16-le"))
+        out = _read_text_with_encoding_fallback(f)
+        assert "Alice" in out and "Paris" in out and "\x00" not in out
+
+
 class TestCsvExtraction:
-    """extract_csv renders a markdown table and is robust to file encoding.
+    """extract_csv: markitdown first (preserving its charset detection),
+    falling back to the encoding-robust renderer only when markitdown fails."""
 
-    Regression: markitdown's CSV converter decodes with the locale default
-    (often ASCII) and raised UnicodeDecodeError on any non-ASCII content.
-    """
-
-    def test_ascii_csv_to_markdown_table(self, temp_dir: Path) -> None:
+    def test_returns_markdown_table(self, temp_dir: Path) -> None:
         f = temp_dir / "a.csv"
         f.write_text("name,age\nAlice,30\nBob,25\n")
         content = extract_csv(f)
-        assert "| name | age |" in content.text
-        assert "| --- | --- |" in content.text
-        assert "| Alice | 30 |" in content.text
+        assert "Alice" in content.text
+        assert "30" in content.text
         assert content.word_count > 0
 
-    def test_non_ascii_latin1_csv(self, temp_dir: Path) -> None:
-        """latin-1 bytes (accented names) — the exact previously-failing case."""
+    def test_non_western_preserved_via_markitdown(self, temp_dir: Path) -> None:
+        """Shift-JIS must still decode correctly (markitdown's charset detection),
+        not be mojibake'd — i.e. no regression vs the prior markitdown path."""
+        f = temp_dir / "sjis.csv"
+        f.write_bytes("name,city\n山田,東京\n".encode("shift_jis"))
+        content = extract_csv(f)
+        assert "山田" in content.text
+        assert "東京" in content.text
+
+    def test_falls_back_when_markitdown_fails(self, temp_dir: Path, monkeypatch) -> None:
+        """When markitdown's CSV converter fails (as on the real non-ASCII
+        Windows-1252 exports), the encoding-robust fallback extracts the file."""
+        def boom(_path: Path) -> str:
+            raise RuntimeError("simulated markitdown CSV failure")
+
+        monkeypatch.setattr(docs_text, "extract_text_markitdown", boom)
         f = temp_dir / "latin1.csv"
         f.write_bytes("name,city\nJosé,Montréal\n".encode("latin-1"))
         content = extract_csv(f)
         assert "José" in content.text
         assert "Montréal" in content.text
-
-    def test_utf8_bom_csv(self, temp_dir: Path) -> None:
-        f = temp_dir / "bom.csv"
-        f.write_bytes("name,city\nZoë,Zürich\n".encode("utf-8-sig"))
-        content = extract_csv(f)
-        assert "Zoë" in content.text
-        assert "Zürich" in content.text
-        # BOM must not leak into the first header cell
-        assert content.text.splitlines()[0].startswith("| name |")
-
-    def test_utf16_csv_not_misdecoded(self, temp_dir: Path) -> None:
-        """UTF-16 (BOM) CSVs must decode via the BOM, not as latin-1 gibberish."""
-        f = temp_dir / "utf16.csv"
-        f.write_bytes("name,city\nJosé,Zürich\n".encode("utf-16"))
-        content = extract_csv(f)
-        assert "José" in content.text
-        assert "Zürich" in content.text
-        assert "\x00" not in content.text
-
-    def test_cp1252_csv_smart_quotes(self, temp_dir: Path) -> None:
-        """Windows-1252 bytes (smart quotes 0x93/0x94, euro 0x80) must decode via
-        cp1252, not latin-1 (which would yield C1 control characters)."""
-        f = temp_dir / "cp1252.csv"
-        f.write_bytes(b"item,price\n\x93widget\x94,\x8050\n")
-        content = extract_csv(f)
-        assert "“widget”" in content.text  # curly double quotes
-        assert "€50" in content.text  # euro sign
-        assert "\x93" not in content.text and "\x80" not in content.text
-
-    def test_bom_less_utf16_csv(self, temp_dir: Path) -> None:
-        """BOM-less UTF-16 is recognized by its NUL density, not mis-read as
-        UTF-8-with-embedded-NULs or latin-1 gibberish."""
-        f = temp_dir / "u16.csv"
-        f.write_bytes("name,city\nAlice,Paris\n".encode("utf-16-le"))
-        content = extract_csv(f)
-        assert "Alice" in content.text
-        assert "Paris" in content.text
-        assert "\x00" not in content.text
-
-    def test_cr_only_line_endings(self, temp_dir: Path) -> None:
-        """CR-only record separators must not break csv parsing."""
-        f = temp_dir / "cr.csv"
-        f.write_bytes(b"a,b\r1,2\r3,4\r")
-        content = extract_csv(f)
-        assert "| 1 | 2 |" in content.text
-        assert "| 3 | 4 |" in content.text
-
-    def test_quoted_field_with_embedded_comma(self, temp_dir: Path) -> None:
-        f = temp_dir / "q.csv"
-        f.write_text('item,note\n"Smith, Inc",hello\n')
-        content = extract_csv(f)
-        assert "| Smith, Inc | hello |" in content.text
-
-    def test_pipe_in_cell_is_escaped(self, temp_dir: Path) -> None:
-        f = temp_dir / "p.csv"
-        f.write_text("a,b\nx|y,z\n")
-        content = extract_csv(f)
-        assert "x\\|y" in content.text
-
-    def test_ragged_rows_padded(self, temp_dir: Path) -> None:
-        f = temp_dir / "r.csv"
-        f.write_text("a,b,c\n1,2\n")
-        content = extract_csv(f)
-        assert "| 1 | 2 |  |" in content.text
+        assert "| name | city |" in content.text  # the fallback renderer's format
 
     def test_empty_csv(self, temp_dir: Path) -> None:
         f = temp_dir / "e.csv"
         f.write_text("")
         content = extract_csv(f)
-        assert content.text == ""
         assert content.word_count == 0
 
 

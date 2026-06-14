@@ -224,11 +224,13 @@ def extract_csv(path: Path) -> ExtractedContent:
     """
     Extract content from a CSV file as a markdown table.
 
-    Reads with an encoding fallback and renders the table directly with the
-    ``csv`` module rather than delegating to markitdown, whose CSV converter
-    decodes with the locale default (often ASCII) and raises a
-    ``UnicodeDecodeError`` on any non-ASCII content — e.g. accented merchant
-    names in a financial export.
+    markitdown is tried first so its charset detection (which correctly decodes
+    e.g. Shift-JIS) is preserved. Its CSV converter, however, decodes with the
+    locale default — ASCII in the MCP server environment — and raises on
+    non-ASCII content it can't auto-detect, such as accented merchant names in a
+    Windows-1252/latin-1 financial export. When markitdown fails we fall back to
+    reading with an encoding fallback and rendering the table directly with the
+    ``csv`` module, so those files extract instead of being stuck unindexed.
 
     Args:
         path: Path to the CSV file
@@ -240,8 +242,11 @@ def extract_csv(path: Path) -> ExtractedContent:
         ExtractionError: If extraction fails
     """
     try:
-        raw = _read_text_with_encoding_fallback(path)
-        text = _csv_to_markdown_table(raw)
+        try:
+            text = extract_text_markitdown(path)
+        except Exception:
+            raw = _read_text_with_encoding_fallback(path)
+            text = _csv_to_markdown_table(raw)
         word_count = len(text.split()) if text else 0
         return ExtractedContent(
             text=text,
