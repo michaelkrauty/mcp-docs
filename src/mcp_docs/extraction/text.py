@@ -1,11 +1,62 @@
 """Plain text, markdown, RTF, HTML, CSV, EPUB, and XML extraction."""
 
+import csv
+import io
 from pathlib import Path
 
 from striprtf.striprtf import rtf_to_text
 
 from mcp_docs.extraction.markitdown_extractor import extract_text_markitdown
 from mcp_docs.models import ExtractedContent, ExtractionError
+
+# Encodings tried, in order, when reading a text file. utf-8-sig comes first so
+# a UTF-8 BOM is stripped rather than left as a stray ﻿ in the first cell
+# (it decodes BOM-less UTF-8 identically); latin-1/cp1252 cover the common
+# non-UTF-8 real-world files (accented names, smart quotes).
+_TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "latin-1", "cp1252")
+
+
+def _read_text_with_encoding_fallback(path: Path) -> str:
+    """Read a text file, trying common encodings before a lossy UTF-8 fallback.
+
+    Reading as strict ASCII/UTF-8 raises ``UnicodeDecodeError`` on an odd byte,
+    so we try the usual encodings and only then decode lossily, ensuring
+    extraction never hard-fails on encoding alone.
+    """
+    for encoding in _TEXT_ENCODINGS:
+        try:
+            return path.read_text(encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _csv_to_markdown_table(raw: str) -> str:
+    """Render CSV text as a GitHub-flavored markdown table.
+
+    Uses the ``csv`` module so quoted fields, embedded commas, and embedded
+    newlines parse correctly. Ragged rows are padded to the widest row; pipes
+    are escaped and embedded newlines flattened so each record stays one row.
+    """
+    rows = list(csv.reader(io.StringIO(raw)))
+    # Drop trailing fully-blank rows (common trailing-newline artifact).
+    while rows and not any(cell.strip() for cell in rows[-1]):
+        rows.pop()
+    if not rows:
+        return ""
+
+    width = max(len(row) for row in rows)
+
+    def _cell(value: str) -> str:
+        return value.replace("|", "\\|").replace("\r", " ").replace("\n", " ").strip()
+
+    def _row(cells: list[str]) -> str:
+        padded = list(cells) + [""] * (width - len(cells))
+        return "| " + " | ".join(_cell(c) for c in padded) + " |"
+
+    lines = [_row(rows[0]), "| " + " | ".join(["---"] * width) + " |"]
+    lines.extend(_row(row) for row in rows[1:])
+    return "\n".join(lines)
 
 
 def extract_text(path: Path) -> ExtractedContent:
@@ -92,20 +143,7 @@ def extract_rtf(path: Path) -> ExtractedContent:
         ExtractionError: If extraction fails
     """
     try:
-        # Try common encodings for RTF files
-        encodings = ["utf-8", "utf-8-sig", "latin-1", "cp1252"]
-        raw_content = None
-
-        for encoding in encodings:
-            try:
-                raw_content = path.read_text(encoding=encoding)
-                break
-            except UnicodeDecodeError:
-                continue
-
-        if raw_content is None:
-            raw_content = path.read_text(encoding="utf-8", errors="replace")
-
+        raw_content = _read_text_with_encoding_fallback(path)
         text = rtf_to_text(raw_content)
         word_count = len(text.split()) if text else 0
         return ExtractedContent(
@@ -150,6 +188,12 @@ def extract_csv(path: Path) -> ExtractedContent:
     """
     Extract content from a CSV file as a markdown table.
 
+    Reads with an encoding fallback and renders the table directly with the
+    ``csv`` module rather than delegating to markitdown, whose CSV converter
+    decodes with the locale default (often ASCII) and raises a
+    ``UnicodeDecodeError`` on any non-ASCII content — e.g. accented merchant
+    names in a financial export.
+
     Args:
         path: Path to the CSV file
 
@@ -160,7 +204,8 @@ def extract_csv(path: Path) -> ExtractedContent:
         ExtractionError: If extraction fails
     """
     try:
-        text = extract_text_markitdown(path)
+        raw = _read_text_with_encoding_fallback(path)
+        text = _csv_to_markdown_table(raw)
         word_count = len(text.split()) if text else 0
         return ExtractedContent(
             text=text,
