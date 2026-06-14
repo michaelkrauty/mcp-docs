@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.11] - 2026-06-14
+
+### Fixed
+
+- **CSV files with any non-ASCII content (e.g. accented merchant names in a financial export) no longer fail extraction.** `extract_csv` delegated to markitdown's CSV converter, which decodes with the locale default encoding — ASCII under the MCP server's environment — and raised `UnicodeDecodeError`, leaving such CSVs perpetually stuck in `processing`/`failed` and absent from search. CSV extraction now reads with an encoding fallback (`utf-8-sig` → `utf-8` → `latin-1` → `cp1252`, then a lossy UTF-8 last resort) and renders the markdown table directly via the `csv` module, so quoted fields, embedded commas/newlines, and pipe characters are handled correctly regardless of file encoding or locale. `extract_rtf` now shares the same encoding-fallback helper, and a UTF-8 BOM is stripped rather than left as a stray character in the first cell.
+
 ## [1.1.10] - 2026-06-14
 
 ### Changed

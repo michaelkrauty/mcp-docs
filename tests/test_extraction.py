@@ -8,7 +8,14 @@ import pytest
 
 from mcp_docs.extraction import ContentExtractor, extract_content
 from mcp_docs.extraction.notebook import extract_ipynb
-from mcp_docs.extraction.text import extract_markdown, extract_text
+from mcp_docs.extraction.text import (
+    _csv_to_markdown_table,
+    _read_text_with_encoding_fallback,
+    extract_csv,
+    extract_markdown,
+    extract_rtf,
+    extract_text,
+)
 from mcp_docs.models import DocumentType, ExtractionError
 
 
@@ -431,3 +438,135 @@ class TestNotebookExtraction:
         nb_file.write_text("[" * 4000 + "]" * 4000, encoding="utf-8")
         with pytest.raises(ExtractionError):
             extract_ipynb(nb_file)
+
+
+class TestCsvMarkdownTable:
+    """_csv_to_markdown_table rendering (the fallback renderer)."""
+
+    def test_basic_table(self) -> None:
+        out = _csv_to_markdown_table("name,age\nAlice,30\nBob,25\n")
+        assert "| name | age |" in out
+        assert "| --- | --- |" in out
+        assert "| Alice | 30 |" in out
+
+    def test_quoted_field_with_embedded_comma(self) -> None:
+        out = _csv_to_markdown_table('item,note\n"Smith, Inc",hello\n')
+        assert "| Smith, Inc | hello |" in out
+
+    def test_pipe_in_cell_is_escaped(self) -> None:
+        out = _csv_to_markdown_table("a,b\nx|y,z\n")
+        assert "x\\|y" in out
+
+    def test_ragged_rows_padded(self) -> None:
+        out = _csv_to_markdown_table("a,b,c\n1,2\n")
+        assert "| 1 | 2 |  |" in out
+
+    def test_empty(self) -> None:
+        assert _csv_to_markdown_table("") == ""
+
+    def test_cr_only_line_endings(self) -> None:
+        out = _csv_to_markdown_table("a,b\r1,2\r3,4\r")
+        assert "| 1 | 2 |" in out
+        assert "| 3 | 4 |" in out
+
+
+class TestEncodingFallback:
+    """_read_text_with_encoding_fallback decodes regardless of encoding/locale."""
+
+    def test_latin1(self, temp_dir: Path) -> None:
+        f = temp_dir / "l.txt"
+        f.write_bytes("José,Montréal".encode("latin-1"))
+        out = _read_text_with_encoding_fallback(f)
+        assert "José" in out and "Montréal" in out
+
+    def test_cp1252_smart_quotes_before_latin1(self, temp_dir: Path) -> None:
+        # latin-1 would map these to C1 control chars; cp1252 must win first.
+        f = temp_dir / "c.txt"
+        f.write_bytes(b"\x93hi\x94 \x8050")
+        out = _read_text_with_encoding_fallback(f)
+        assert "“hi”" in out and "€50" in out
+
+    def test_utf8_bom_stripped(self, temp_dir: Path) -> None:
+        f = temp_dir / "b.txt"
+        f.write_bytes("header".encode("utf-8-sig"))
+        assert _read_text_with_encoding_fallback(f) == "header"
+
+    def test_utf16_with_bom(self, temp_dir: Path) -> None:
+        f = temp_dir / "u.txt"
+        f.write_bytes("Zürich".encode("utf-16"))
+        out = _read_text_with_encoding_fallback(f)
+        assert out == "Zürich" and "\x00" not in out
+
+    def test_bom_less_utf16le(self, temp_dir: Path) -> None:
+        f = temp_dir / "u2.txt"
+        f.write_bytes("Alice,Paris".encode("utf-16-le"))
+        out = _read_text_with_encoding_fallback(f)
+        assert "Alice" in out and "Paris" in out and "\x00" not in out
+
+    def test_bom_less_utf16be_endian(self, temp_dir: Path) -> None:
+        # The NUL-pattern path must pick the correct endian, not accept UTF-16BE
+        # input mis-decoded as UTF-16LE mojibake.
+        f = temp_dir / "u3.txt"
+        f.write_bytes("Alice,Paris".encode("utf-16-be"))
+        out = _read_text_with_encoding_fallback(f)
+        assert "Alice" in out and "Paris" in out and "\x00" not in out
+
+
+class TestCsvExtraction:
+    """extract_csv renders a markdown table via the encoding-robust direct path.
+
+    markitdown's CSV converter is unreliable for this corpus (raises on latin-1,
+    mojibakes cp1252, leaves a UTF-8 BOM), so CSV extraction does not use it.
+    """
+
+    def test_returns_markdown_table(self, temp_dir: Path) -> None:
+        f = temp_dir / "a.csv"
+        f.write_text("name,age\nAlice,30\nBob,25\n")
+        content = extract_csv(f)
+        assert "| name | age |" in content.text
+        assert "| Alice | 30 |" in content.text
+        assert content.word_count > 0
+
+    def test_latin1_extracts(self, temp_dir: Path) -> None:
+        """The exact previously-failing case: accented names in a latin-1 export."""
+        f = temp_dir / "latin1.csv"
+        f.write_bytes("name,city\nJosé,Montréal\n".encode("latin-1"))
+        content = extract_csv(f)
+        assert "José" in content.text and "Montréal" in content.text
+
+    def test_cp1252_decoded_cleanly(self, temp_dir: Path) -> None:
+        """cp1252 smart quotes/euro decode correctly (markitdown mojibakes these)."""
+        f = temp_dir / "cp.csv"
+        f.write_bytes(b"item,price\n\x93widget\x94,\x8050\n")
+        content = extract_csv(f)
+        assert "“widget”" in content.text and "€50" in content.text
+
+    def test_utf8_bom_header_clean(self, temp_dir: Path) -> None:
+        """No stray BOM in the first header cell (markitdown leaves one)."""
+        f = temp_dir / "bom.csv"
+        f.write_bytes("name,city\nZoe,Paris\n".encode("utf-8-sig"))
+        content = extract_csv(f)
+        assert content.text.splitlines()[0].startswith("| name |")
+
+    def test_empty_csv(self, temp_dir: Path) -> None:
+        f = temp_dir / "e.csv"
+        f.write_text("")
+        content = extract_csv(f)
+        assert content.word_count == 0
+
+
+class TestRtfExtraction:
+    """extract_rtf shares the encoding-fallback helper after the refactor."""
+
+    def test_rtf_extracts_text(self, temp_dir: Path) -> None:
+        f = temp_dir / "a.rtf"
+        f.write_text(r"{\rtf1\ansi\deff0 Hello World}")
+        content = extract_rtf(f)
+        assert "Hello" in content.text
+
+    def test_rtf_non_ascii_cp1252(self, temp_dir: Path) -> None:
+        f = temp_dir / "b.rtf"
+        # cp1252 smart-quote byte (0x93) must not raise
+        f.write_bytes(b"{\\rtf1\\ansi Hello \x93World\x94}")
+        content = extract_rtf(f)
+        assert "Hello" in content.text
