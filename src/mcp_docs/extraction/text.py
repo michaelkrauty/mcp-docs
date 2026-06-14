@@ -44,11 +44,16 @@ def _read_text_with_encoding_fallback(path: Path) -> str:
             except UnicodeDecodeError:
                 break
     # BOM-less UTF-16 (e.g. some Windows exports): a high density of NUL bytes
-    # is the signature — ASCII text in UTF-16 is ~half NULs. UTF-8 below would
-    # otherwise "succeed" (NUL is valid UTF-8) and return a string riddled with
-    # embedded NULs. Pick the endianness from NUL position (UTF-16LE ASCII has
-    # NULs at odd indices, UTF-16BE at even) and require a clean (NUL-free)
-    # decode, so UTF-16BE input is not mis-accepted as mojibake'd UTF-16LE.
+    # is the signature — Latin/ASCII text in UTF-16 is ~half NULs. UTF-8 below
+    # would otherwise "succeed" (NUL is valid UTF-8) and return a string riddled
+    # with embedded NULs. Pick the endianness from NUL position (UTF-16LE
+    # Latin/ASCII has NULs at odd indices, UTF-16BE at even) and require a clean
+    # (NUL-free) decode, so UTF-16BE input is not mis-accepted as mojibake'd
+    # UTF-16LE. Limitation: BOM-less UTF-16 that is *predominantly* non-Latin
+    # (e.g. CJK) has few NUL bytes and falls below this threshold, so it is read
+    # via the single-byte fallback (best-effort) — there is no reliable
+    # deterministic signal for it, and heuristic detection misreads the far more
+    # common short Western files. Such files do not occur in this corpus.
     if data and data.count(0) / len(data) > 0.25:
         nul_odd = sum(1 for i in range(1, len(data), 2) if data[i] == 0)
         nul_even = sum(1 for i in range(0, len(data), 2) if data[i] == 0)
