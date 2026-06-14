@@ -471,6 +471,15 @@ class TestCsvExtraction:
         # BOM must not leak into the first header cell
         assert content.text.splitlines()[0].startswith("| name |")
 
+    def test_utf16_csv_not_misdecoded(self, temp_dir: Path) -> None:
+        """UTF-16 (BOM) CSVs must decode via the BOM, not as latin-1 gibberish."""
+        f = temp_dir / "utf16.csv"
+        f.write_bytes("name,city\nJosé,Zürich\n".encode("utf-16"))
+        content = extract_csv(f)
+        assert "José" in content.text
+        assert "Zürich" in content.text
+        assert "\x00" not in content.text
+
     def test_quoted_field_with_embedded_comma(self, temp_dir: Path) -> None:
         f = temp_dir / "q.csv"
         f.write_text('item,note\n"Smith, Inc",hello\n')

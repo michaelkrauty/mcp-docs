@@ -19,16 +19,32 @@ _TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "latin-1", "cp1252")
 def _read_text_with_encoding_fallback(path: Path) -> str:
     """Read a text file, trying common encodings before a lossy UTF-8 fallback.
 
-    Reading as strict ASCII/UTF-8 raises ``UnicodeDecodeError`` on an odd byte,
-    so we try the usual encodings and only then decode lossily, ensuring
-    extraction never hard-fails on encoding alone.
+    A UTF-16/UTF-32 byte-order mark is honored first: those encodings (e.g.
+    Excel "Unicode Text" CSV exports) interleave NUL bytes that latin-1 below
+    would happily decode into gibberish, since latin-1 never raises. After that
+    we try UTF-8 (BOM-aware) then the common single-byte encodings, decoding
+    lossily only as a last resort so extraction never hard-fails on encoding.
     """
+    data = path.read_bytes()
+    # Check 4-byte UTF-32 BOMs before the 2-byte UTF-16 ones (a UTF-32LE BOM
+    # starts with the UTF-16LE BOM).
+    for bom, encoding in (
+        (b"\xff\xfe\x00\x00", "utf-32"),
+        (b"\x00\x00\xfe\xff", "utf-32"),
+        (b"\xff\xfe", "utf-16"),
+        (b"\xfe\xff", "utf-16"),
+    ):
+        if data.startswith(bom):
+            try:
+                return data.decode(encoding)
+            except UnicodeDecodeError:
+                break
     for encoding in _TEXT_ENCODINGS:
         try:
-            return path.read_text(encoding=encoding)
+            return data.decode(encoding)
         except UnicodeDecodeError:
             continue
-    return path.read_text(encoding="utf-8", errors="replace")
+    return data.decode("utf-8", errors="replace")
 
 
 def _csv_to_markdown_table(raw: str) -> str:
