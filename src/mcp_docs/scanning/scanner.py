@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,6 +56,10 @@ class ScanResult:
     files_relocated: int = 0
     files_skipped: int = 0
     errors: list[str] = field(default_factory=list)
+    # False if the filesystem walk did not finish (file-limit cap or an
+    # error). When incomplete, deletion reconciliation is skipped so that
+    # documents that simply were not visited are never marked deleted.
+    complete: bool = True
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -69,6 +73,7 @@ class ScanResult:
             "files_relocated": self.files_relocated,
             "files_skipped": self.files_skipped,
             "errors": self.errors,
+            "complete": self.complete,
         }
 
 
@@ -153,10 +158,12 @@ class DocumentScanner:
 
         root_path = Path(root.path)
         if not root_path.exists():
+            result.complete = False
             result.errors.append(f"Root path does not exist: {root.path}")
             return result
 
         if not root_path.is_dir():
+            result.complete = False
             result.errors.append(f"Root path is not a directory: {root.path}")
             return result
 
@@ -171,17 +178,35 @@ class DocumentScanner:
         # Track which paths we've seen
         seen_paths: set[str] = set()
 
+        # pathlib's rglob/glob silently skip unreadable subtrees instead of
+        # raising, which would make a partial scan look complete and let the
+        # deletion pass purge live documents under a directory that merely
+        # became unreadable. Walk with os.walk so directory-listing failures
+        # surface via onerror and mark the scan incomplete (skipping deletion).
+        def _on_walk_error(err: OSError) -> None:
+            result.complete = False
+            if len(result.errors) < MAX_ERRORS:
+                result.errors.append(
+                    f"Error listing directory during scan: {err}"
+                )
+
+        def _iter_files() -> Iterator[Path]:
+            for dirpath, dirnames, filenames in os.walk(
+                root_path, onerror=_on_walk_error, followlinks=False
+            ):
+                for filename in filenames:
+                    yield Path(dirpath) / filename
+                if not self.recursive:
+                    # Only scan the top-level directory; do not descend.
+                    dirnames[:] = []
+
         # Scan directory
         try:
-            if self.recursive:
-                files = root_path.rglob("*")
-            else:
-                files = root_path.glob("*")
-
             files_processed = 0
-            for file_path in files:
+            for file_path in _iter_files():
                 # Enforce file limit to prevent DoS
                 if files_processed >= MAX_FILES_PER_ROOT:
+                    result.complete = False
                     if len(result.errors) < MAX_ERRORS:
                         result.errors.append(
                             f"File limit reached ({MAX_FILES_PER_ROOT}), stopping scan"
@@ -298,25 +323,41 @@ class DocumentScanner:
                         result.errors.append(f"Error processing {file_path}: {e}")
 
         except Exception as e:
+            result.complete = False
             if len(result.errors) < MAX_ERRORS:
                 result.errors.append(f"Error scanning directory: {e}")
 
-        # Mark deleted files and clean up index
-        for path_str, doc in existing_docs.items():
-            if path_str not in seen_paths:
-                self.document_store.update(
-                    doc.id,
-                    status=DocumentStatus.DELETED,
-                )
-                result.files_deleted += 1
+        # Mark deleted files and clean up index.
+        #
+        # Only reconcile deletions when the walk completed. On a truncated
+        # (file-limit) or errored walk, seen_paths is incomplete, so an
+        # existing document missing from it may simply not have been visited
+        # rather than removed from disk. Marking such documents DELETED and
+        # purging their vectors would destroy live, irreplaceable data, so the
+        # deletion pass is skipped and the incomplete state is reported instead.
+        if result.complete:
+            for path_str, doc in existing_docs.items():
+                if path_str not in seen_paths:
+                    self.document_store.update(
+                        doc.id,
+                        status=DocumentStatus.DELETED,
+                    )
+                    result.files_deleted += 1
 
-                # Clean up vector index for deleted document
-                if delete_callback:
-                    try:
-                        await delete_callback(doc.id)
-                    except Exception as e:
-                        if len(result.errors) < MAX_ERRORS:
-                            result.errors.append(f"Failed to delete index for {path_str}: {e}")
+                    # Clean up vector index for deleted document
+                    if delete_callback:
+                        try:
+                            await delete_callback(doc.id)
+                        except Exception as e:
+                            if len(result.errors) < MAX_ERRORS:
+                                result.errors.append(
+                                    f"Failed to delete index for {path_str}: {e}"
+                                )
+        elif len(result.errors) < MAX_ERRORS:
+            result.errors.append(
+                "Scan incomplete; skipped deletion reconciliation to avoid "
+                "removing documents that were not visited this scan"
+            )
 
         # Update last scan time
         self.document_store.update_root_scan(root.path, result.files_found)
@@ -358,6 +399,7 @@ class DocumentScanner:
                         root_path=root.path,
                         scanned_at=datetime.now(UTC),
                         errors=[str(e)],
+                        complete=False,
                     )
                 )
 

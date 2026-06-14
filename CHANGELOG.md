@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.12] - 2026-06-14
+
+### Fixed
+
+- **A directory scan that does not cover the whole tree no longer marks unvisited documents as deleted or purges their vectors from the search index.** `scan_root` reconciles deletions by treating any registered document it did not encounter during the filesystem walk as removed from disk. When the walk did not reach every file — because it was truncated at `MAX_FILES_PER_ROOT`, an error aborted traversal, or a subdirectory had become unreadable (`pathlib`'s `rglob`/`glob` silently omit the children of a directory they cannot list rather than raising) — the set of seen paths was incomplete, so documents that were simply never reached were wrongly flagged `DELETED` and had their Qdrant points removed, losing index data for files that still exist on disk. Scanning now uses `os.walk` with an error callback so directory-listing failures are detected instead of silently swallowed, tracks whether the walk completed via a new `complete` boolean on the scan result, and runs deletion reconciliation only when the scan completed. An incomplete scan performs no deletions and reports the condition via `complete` and an explanatory entry in `errors`.
+
 ## [1.1.11] - 2026-06-14
 
 ### Fixed
