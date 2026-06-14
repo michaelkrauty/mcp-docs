@@ -480,6 +480,16 @@ class TestCsvExtraction:
         assert "Zürich" in content.text
         assert "\x00" not in content.text
 
+    def test_cp1252_csv_smart_quotes(self, temp_dir: Path) -> None:
+        """Windows-1252 bytes (smart quotes 0x93/0x94, euro 0x80) must decode via
+        cp1252, not latin-1 (which would yield C1 control characters)."""
+        f = temp_dir / "cp1252.csv"
+        f.write_bytes(b"item,price\n\x93widget\x94,\x8050\n")
+        content = extract_csv(f)
+        assert "“widget”" in content.text  # curly double quotes
+        assert "€50" in content.text  # euro sign
+        assert "\x93" not in content.text and "\x80" not in content.text
+
     def test_quoted_field_with_embedded_comma(self, temp_dir: Path) -> None:
         f = temp_dir / "q.csv"
         f.write_text('item,note\n"Smith, Inc",hello\n')

@@ -10,10 +10,12 @@ from mcp_docs.extraction.markitdown_extractor import extract_text_markitdown
 from mcp_docs.models import ExtractedContent, ExtractionError
 
 # Encodings tried, in order, when reading a text file. utf-8-sig comes first so
-# a UTF-8 BOM is stripped rather than left as a stray ﻿ in the first cell
-# (it decodes BOM-less UTF-8 identically); latin-1/cp1252 cover the common
-# non-UTF-8 real-world files (accented names, smart quotes).
-_TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "latin-1", "cp1252")
+# a UTF-8 BOM is stripped rather than left as a stray ﻿ in the first cell (it
+# decodes BOM-less UTF-8 identically). cp1252 is tried before latin-1 because
+# latin-1 never raises (it would map Windows-1252 smart quotes/euro to C1
+# control chars and shadow cp1252); latin-1 stays last as the never-fail
+# catch-all, with cp1252 falling through to it on its few undefined bytes.
+_TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
 
 
 def _read_text_with_encoding_fallback(path: Path) -> str:
