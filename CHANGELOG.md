@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.10] - 2026-06-14
+
+### Changed
+
+- Bumped the shared `vector-core` library to v1.2.7 (FactStore: case-insensitive `query()`/`list_summaries()` type filters + rejection of inverted `valid_from`/`valid_to` ranges). mcp-docs exposes no fact tools (facts live in mcp-notes), so no behavior of this server changes; this keeps the pin current with the shared library.
+
 ## [1.1.9] - 2026-06-13
 
 ### Changed
