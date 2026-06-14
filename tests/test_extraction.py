@@ -490,6 +490,16 @@ class TestCsvExtraction:
         assert "€50" in content.text  # euro sign
         assert "\x93" not in content.text and "\x80" not in content.text
 
+    def test_bom_less_utf16_csv(self, temp_dir: Path) -> None:
+        """BOM-less UTF-16 is recognized by its NUL density, not mis-read as
+        UTF-8-with-embedded-NULs or latin-1 gibberish."""
+        f = temp_dir / "u16.csv"
+        f.write_bytes("name,city\nAlice,Paris\n".encode("utf-16-le"))
+        content = extract_csv(f)
+        assert "Alice" in content.text
+        assert "Paris" in content.text
+        assert "\x00" not in content.text
+
     def test_cr_only_line_endings(self, temp_dir: Path) -> None:
         """CR-only record separators must not break csv parsing."""
         f = temp_dir / "cr.csv"
