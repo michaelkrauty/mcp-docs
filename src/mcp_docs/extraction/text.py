@@ -46,9 +46,18 @@ def _read_text_with_encoding_fallback(path: Path) -> str:
     # BOM-less UTF-16 (e.g. some Windows exports): a high density of NUL bytes
     # is the signature — ASCII text in UTF-16 is ~half NULs. UTF-8 below would
     # otherwise "succeed" (NUL is valid UTF-8) and return a string riddled with
-    # embedded NULs. A clean (NUL-free) decode confirms the guess.
+    # embedded NULs. Pick the endianness from NUL position (UTF-16LE ASCII has
+    # NULs at odd indices, UTF-16BE at even) and require a clean (NUL-free)
+    # decode, so UTF-16BE input is not mis-accepted as mojibake'd UTF-16LE.
     if data and data.count(0) / len(data) > 0.25:
-        for encoding in ("utf-16-le", "utf-16-be"):
+        nul_odd = sum(1 for i in range(1, len(data), 2) if data[i] == 0)
+        nul_even = sum(1 for i in range(0, len(data), 2) if data[i] == 0)
+        candidates = (
+            ("utf-16-le", "utf-16-be")
+            if nul_odd >= nul_even
+            else ("utf-16-be", "utf-16-le")
+        )
+        for encoding in candidates:
             try:
                 decoded = data.decode(encoding)
             except UnicodeDecodeError:
@@ -224,13 +233,18 @@ def extract_csv(path: Path) -> ExtractedContent:
     """
     Extract content from a CSV file as a markdown table.
 
-    markitdown is tried first so its charset detection (which correctly decodes
-    e.g. Shift-JIS) is preserved. Its CSV converter, however, decodes with the
-    locale default — ASCII in the MCP server environment — and raises on
-    non-ASCII content it can't auto-detect, such as accented merchant names in a
-    Windows-1252/latin-1 financial export. When markitdown fails we fall back to
-    reading with an encoding fallback and rendering the table directly with the
-    ``csv`` module, so those files extract instead of being stuck unindexed.
+    Reads with an encoding fallback and renders the table directly with the
+    ``csv`` module instead of delegating to markitdown. markitdown's CSV
+    converter is unreliable for the encodings this corpus actually contains: it
+    raises ``UnicodeDecodeError`` on non-ASCII Windows-1252/latin-1 exports
+    (locale-default ASCII decoding), mojibakes cp1252 smart quotes/euro by
+    decoding them as latin-1, and leaves a UTF-8 BOM as a stray character in the
+    first cell — all verified. The direct path handles UTF-8 (BOM-aware),
+    Windows-1252, latin-1, and BOM/BOM-less UTF-16 correctly and deterministically
+    (independent of locale). The trade-off is that genuinely single-byte
+    non-Western encodings (e.g. Shift-JIS), which markitdown can charset-detect,
+    fall back to best-effort latin-1; those do not occur in this corpus and
+    markitdown's CSV path mishandles the encodings that do.
 
     Args:
         path: Path to the CSV file
@@ -242,11 +256,8 @@ def extract_csv(path: Path) -> ExtractedContent:
         ExtractionError: If extraction fails
     """
     try:
-        try:
-            text = extract_text_markitdown(path)
-        except Exception:
-            raw = _read_text_with_encoding_fallback(path)
-            text = _csv_to_markdown_table(raw)
+        raw = _read_text_with_encoding_fallback(path)
+        text = _csv_to_markdown_table(raw)
         word_count = len(text.split()) if text else 0
         return ExtractedContent(
             text=text,
