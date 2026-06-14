@@ -490,6 +490,14 @@ class TestCsvExtraction:
         assert "€50" in content.text  # euro sign
         assert "\x93" not in content.text and "\x80" not in content.text
 
+    def test_cr_only_line_endings(self, temp_dir: Path) -> None:
+        """CR-only record separators must not break csv parsing."""
+        f = temp_dir / "cr.csv"
+        f.write_bytes(b"a,b\r1,2\r3,4\r")
+        content = extract_csv(f)
+        assert "| 1 | 2 |" in content.text
+        assert "| 3 | 4 |" in content.text
+
     def test_quoted_field_with_embedded_comma(self, temp_dir: Path) -> None:
         f = temp_dir / "q.csv"
         f.write_text('item,note\n"Smith, Inc",hello\n')

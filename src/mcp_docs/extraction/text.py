@@ -9,23 +9,25 @@ from striprtf.striprtf import rtf_to_text
 from mcp_docs.extraction.markitdown_extractor import extract_text_markitdown
 from mcp_docs.models import ExtractedContent, ExtractionError
 
-# Encodings tried, in order, when reading a text file. utf-8-sig comes first so
-# a UTF-8 BOM is stripped rather than left as a stray ﻿ in the first cell (it
-# decodes BOM-less UTF-8 identically). cp1252 is tried before latin-1 because
-# latin-1 never raises (it would map Windows-1252 smart quotes/euro to C1
-# control chars and shadow cp1252); latin-1 stays last as the never-fail
-# catch-all, with cp1252 falling through to it on its few undefined bytes.
+# Encodings tried in order after any BOM check. utf-8-sig precedes utf-8 so a
+# UTF-8 BOM is stripped (it decodes BOM-less UTF-8 identically). cp1252 precedes
+# latin-1 because latin-1 never raises and would otherwise map Windows-1252
+# smart quotes/euro to C1 control chars and shadow cp1252; latin-1 stays last as
+# the never-fail catch-all (cp1252 falls through to it on its few undefined
+# bytes). Deterministic order is deliberate: heuristic charset detection
+# (charset-normalizer) mis-identifies short Western files and would corrupt the
+# overwhelmingly-common UTF-8/Windows-1252/latin-1 case it is meant to help.
 _TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
 
 
 def _read_text_with_encoding_fallback(path: Path) -> str:
-    """Read a text file, trying common encodings before a lossy UTF-8 fallback.
+    """Read a text file robustly, regardless of encoding or locale.
 
     A UTF-16/UTF-32 byte-order mark is honored first: those encodings (e.g.
     Excel "Unicode Text" CSV exports) interleave NUL bytes that latin-1 below
     would happily decode into gibberish, since latin-1 never raises. After that
-    we try UTF-8 (BOM-aware) then the common single-byte encodings, decoding
-    lossily only as a last resort so extraction never hard-fails on encoding.
+    the encodings in ``_TEXT_ENCODINGS`` are tried in order, with a lossy UTF-8
+    decode only as a last resort so extraction never hard-fails on encoding.
     """
     data = path.read_bytes()
     # Check 4-byte UTF-32 BOMs before the 2-byte UTF-16 ones (a UTF-32LE BOM
@@ -56,7 +58,11 @@ def _csv_to_markdown_table(raw: str) -> str:
     newlines parse correctly. Ragged rows are padded to the widest row; pipes
     are escaped and embedded newlines flattened so each record stays one row.
     """
-    rows = list(csv.reader(io.StringIO(raw)))
+    # newline="" lets the csv module handle CR/LF/CR-only record separators and
+    # newlines embedded in quoted fields, instead of StringIO pre-translating
+    # them (CR-only input otherwise raises "new-line character seen in
+    # unquoted field").
+    rows = list(csv.reader(io.StringIO(raw, newline="")))
     # Drop trailing fully-blank rows (common trailing-newline artifact).
     while rows and not any(cell.strip() for cell in rows[-1]):
         rows.pop()
