@@ -303,6 +303,39 @@ class TestUpdateDocumentTags:
         assert "error_code" in result
         assert "not found" in result["message"].lower()
 
+    @pytest.mark.asyncio
+    async def test_update_tags_syncs_index(self, tmp_path) -> None:
+        """Updating tags also updates the vector-index payload, with the
+        document's normalized (lowercased) tags."""
+        from unittest.mock import AsyncMock, patch
+
+        from mcp_docs.storage.database import DocumentStore
+        from mcp_docs.tools import documents as docs_mod
+
+        sample = tmp_path / "doc.txt"
+        sample.write_text("content")
+        store = DocumentStore(db_path=tmp_path / "tags.db")
+        try:
+            doc = store.register(sample)
+            with (
+                patch.object(docs_mod, "get_document_store", return_value=store),
+                patch.object(docs_mod, "get_document_indexer") as mock_get_indexer,
+            ):
+                indexer = AsyncMock()
+                mock_get_indexer.return_value = indexer
+                result = await docs_mod.update_document_tags(
+                    str(doc.id), ["Alpha", "BETA"]
+                )
+
+            assert "error_code" not in result
+            assert sorted(result["tags"]) == ["alpha", "beta"]
+            indexer.update_document_tags_in_index.assert_awaited_once()
+            passed_doc = indexer.update_document_tags_in_index.await_args.args[0]
+            assert passed_doc.id == doc.id
+            assert sorted(passed_doc.tags) == ["alpha", "beta"]
+        finally:
+            store.close()
+
 
 class TestDeleteDocument:
     """Tests for document deletion."""

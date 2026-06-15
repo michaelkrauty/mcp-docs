@@ -253,6 +253,103 @@ class TestDocumentIndexerColdDelete:
         assert fake_storage.delete_by_filter.call_args.kwargs.get("value") == str(doc_id)
 
 
+class TestDocumentIndexerTagSync:
+    """update_document_tags_in_index must refresh the tags filter payload on
+    every point and, for an indexed document, rebuild the summary point (which
+    embeds the tags in its searchable content)."""
+
+    @pytest.mark.asyncio
+    async def test_indexed_document_updates_payload_and_rebuilds_summary(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from mcp_docs.indexing.indexer import DocumentIndexer
+        from mcp_docs.models import ExtractionStatus
+        from mcp_docs.storage.database import DocumentStore
+
+        store = DocumentStore(db_path=tmp_path / "tagidx.db")
+        try:
+            f = tmp_path / "d.txt"
+            f.write_text("body")
+            doc = store.register(f)
+            store.update(doc.id, extraction_status=ExtractionStatus.INDEXED)
+            doc = store.update_tags(doc.id, ["alpha", "beta"])
+
+            fake_storage = MagicMock()
+            fake_storage.update_payload = AsyncMock()
+            fake_storage.upsert_batch = AsyncMock()
+            fake_embedder = MagicMock()
+            fake_embedder.embed_batch = AsyncMock(return_value=[[0.1, 0.2, 0.3]])
+
+            indexer = DocumentIndexer(
+                document_store=store,
+                storage=fake_storage,
+                embedder=fake_embedder,
+                global_vocab=MagicMock(),
+                collection_name="test_collection",
+            )
+            monkeypatch.setattr(
+                indexer, "_create_point", MagicMock(return_value="SUMMARY_POINT")
+            )
+
+            await indexer.update_document_tags_in_index(doc)
+
+            # Tag filter payload updated on all of the document's points.
+            fake_storage.update_payload.assert_awaited_once()
+            assert fake_storage.update_payload.call_args.kwargs["payload"] == {
+                "tags": ["alpha", "beta"]
+            }
+            # Summary point rebuilt with the new tags in its embedded content.
+            fake_embedder.embed_batch.assert_awaited_once()
+            summary_text = fake_embedder.embed_batch.await_args.args[0][0]
+            assert "alpha" in summary_text and "beta" in summary_text
+            fake_storage.upsert_batch.assert_awaited_once_with(
+                "test_collection", ["SUMMARY_POINT"]
+            )
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_unindexed_document_only_updates_payload(
+        self, tmp_path
+    ) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from mcp_docs.indexing.indexer import DocumentIndexer
+        from mcp_docs.storage.database import DocumentStore
+
+        store = DocumentStore(db_path=tmp_path / "tagidx.db")
+        try:
+            f = tmp_path / "d.txt"
+            f.write_text("body")
+            doc = store.register(f)  # QUEUED, not indexed
+            doc = store.update_tags(doc.id, ["x"])
+
+            fake_storage = MagicMock()
+            fake_storage.update_payload = AsyncMock()
+            fake_storage.upsert_batch = AsyncMock()
+            fake_embedder = MagicMock()
+            fake_embedder.embed_batch = AsyncMock()
+
+            indexer = DocumentIndexer(
+                document_store=store,
+                storage=fake_storage,
+                embedder=fake_embedder,
+                global_vocab=MagicMock(),
+                collection_name="test_collection",
+            )
+
+            await indexer.update_document_tags_in_index(doc)
+
+            fake_storage.update_payload.assert_awaited_once()
+            # Not indexed: no summary rebuild.
+            fake_embedder.embed_batch.assert_not_awaited()
+            fake_storage.upsert_batch.assert_not_awaited()
+        finally:
+            store.close()
+
+
 class TestIndexAllCompleteCorpus:
     """index_all must index every extracted document, not just the 50 most
     recent. Regression for the silent 50-document cap: index_all enumerated via

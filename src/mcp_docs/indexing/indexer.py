@@ -455,6 +455,61 @@ class DocumentIndexer:
         except Exception as e:
             logger.warning(f"Failed to update path in index for document {document_id}: {e}")
 
+    async def update_document_tags_in_index(self, document: Document) -> None:
+        """
+        Propagate a document's current tags into the vector index.
+
+        Every point carries a ``tags`` payload used to filter searches, and the
+        document summary point additionally embeds the tags in its searchable
+        content (see ``_generate_doc_summary``). A tag change must update both,
+        or the index keeps matching and serving the document's previous tags
+        until a full reindex.
+
+        Updates the tags payload on every existing point and, when the document
+        is indexed, regenerates the summary point so its content and vectors
+        reflect the new tags. This is metadata-only and does not need the
+        source file. Best-effort: failures are logged, not raised.
+
+        Args:
+            document: The document with its updated tags.
+        """
+        await self._ensure_components()
+        assert self.storage is not None  # set by _ensure_components
+        assert self.embedder is not None
+        document_id = document.id
+
+        # Tag filter payload on every point (no-op if the document is unindexed).
+        try:
+            await self.storage.update_payload(
+                self.collection_name,
+                filter_conditions=[
+                    FieldCondition(key="document_id", match=MatchValue(value=str(document_id))),
+                ],
+                payload={"tags": document.tags},
+            )
+        except Exception as e:
+            logger.warning(f"Failed to update tags payload for document {document_id}: {e}")
+
+        # The summary point embeds the tags in its content and vectors, so it
+        # must be rebuilt. Skip when the document is not indexed, to avoid
+        # creating a point for a document that is absent from the index.
+        if document.extraction_status != ExtractionStatus.INDEXED:
+            return
+
+        try:
+            summary = self._generate_doc_summary(document)
+            embedding = (await self.embedder.embed_batch([summary]))[0]
+            point = self._create_point(
+                point_type="document",
+                document=document,
+                content=summary,
+                embedding=embedding,
+            )
+            await self.storage.upsert_batch(self.collection_name, [point])
+            logger.debug(f"Refreshed summary point for document {document_id}")
+        except Exception as e:
+            logger.warning(f"Failed to refresh summary point for document {document_id}: {e}")
+
     async def update_paths_batch_in_index(self, old_prefix: str, new_prefix: str) -> int:
         """
         Batch update paths in vector index for directory moves.

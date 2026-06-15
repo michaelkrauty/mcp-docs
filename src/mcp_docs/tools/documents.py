@@ -166,9 +166,17 @@ async def update_document_tags(
     if document is None:
         return error_response(ErrorCode.NOT_FOUND, f"Document not found: {document_id}")
 
-    # Update tags
-    store.update_tags(uuid, tags)
-    updated = store.read(uuid)
+    # Update tags (update_tags returns the refreshed document).
+    updated = store.update_tags(uuid, tags)
+
+    # Keep the vector-index payload in sync so tag filters and result metadata
+    # reflect the new tags; otherwise search keeps matching and showing the
+    # document's previous tags until a full reindex.
+    try:
+        indexer = await get_document_indexer()
+        await indexer.update_document_tags_in_index(updated)
+    except Exception as e:
+        logger.warning(f"Failed to sync tags to index for {document_id}: {e}")
 
     return updated.to_dict()
 
