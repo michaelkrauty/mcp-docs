@@ -1,11 +1,11 @@
 """Tests for document processing queue."""
 
-import asyncio
 import tempfile
 from pathlib import Path
 
 import pytest
 
+from mcp_docs.models import ExtractionStatus
 from mcp_docs.processing import (
     DocumentProcessor,
     ProcessingResult,
@@ -251,6 +251,121 @@ class TestDocumentProcessor:
 
         finally:
             await processor.stop()
+
+
+class TestCancel:
+    """cancel() must only cancel queued documents and record a CANCELLED
+    status, never clobbering completed work or marking a cancellation as a
+    failure (which startup recovery would re-enqueue)."""
+
+    @pytest.mark.asyncio
+    async def test_cancel_queued_records_cancelled_status(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        assert store.read(doc.id).extraction_status == ExtractionStatus.QUEUED
+
+        processor = DocumentProcessor(store, max_workers=0)
+        assert processor.cancel(doc.id) is True
+
+        updated = store.read(doc.id)
+        assert updated.extraction_status == ExtractionStatus.CANCELLED
+        assert updated.extraction_error is None
+        assert doc.id in processor.cancelled
+
+    @pytest.mark.asyncio
+    async def test_cancel_does_not_clobber_indexed(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        """An already-indexed document is never flipped to a terminal
+        cancelled/failed state by a stray cancel call."""
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        store.update(doc.id, extraction_status=ExtractionStatus.INDEXED)
+
+        processor = DocumentProcessor(store, max_workers=0)
+        assert processor.cancel(doc.id) is False
+        assert store.read(doc.id).extraction_status == ExtractionStatus.INDEXED
+
+    @pytest.mark.asyncio
+    async def test_cancel_does_not_clobber_extracted(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        store.update(doc.id, extraction_status=ExtractionStatus.EXTRACTED)
+
+        processor = DocumentProcessor(store, max_workers=0)
+        assert processor.cancel(doc.id) is False
+        assert store.read(doc.id).extraction_status == ExtractionStatus.EXTRACTED
+
+    @pytest.mark.asyncio
+    async def test_cancel_refuses_in_progress(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        processor = DocumentProcessor(store, max_workers=0)
+        processor.in_progress[doc.id] = ProcessingTask(
+            document_id=doc.id, path=sample_file
+        )
+
+        assert processor.cancel(doc.id) is False
+        # Still queued, not clobbered.
+        assert store.read(doc.id).extraction_status == ExtractionStatus.QUEUED
+
+    @pytest.mark.asyncio
+    async def test_cancel_missing_document_returns_false(
+        self, store: DocumentStore
+    ) -> None:
+        from uuid import uuid4
+
+        processor = DocumentProcessor(store, max_workers=0)
+        assert processor.cancel(uuid4()) is False
+
+    @pytest.mark.asyncio
+    async def test_get_status_reports_cancelled(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        processor = DocumentProcessor(store, max_workers=0)
+        assert processor.cancel(doc.id) is True
+
+        status = processor.get_status(doc.id)
+        assert status["status"] == ProcessingStatus.CANCELLED.value
+
+    @pytest.mark.asyncio
+    async def test_recovery_does_not_reenqueue_cancelled(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        """Startup recovery must not re-enqueue cancelled documents."""
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        store.update(doc.id, extraction_status=ExtractionStatus.CANCELLED)
+
+        processor = DocumentProcessor(store, max_workers=0)
+        await processor._reenqueue_orphaned_documents()
+
+        assert processor.queue.qsize() == 0
+        assert store.read(doc.id).extraction_status == ExtractionStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_recovery_migrates_legacy_cancellation(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        """Documents cancelled by the old version (stored as FAILED with a
+        'Processing cancelled' error) are migrated to CANCELLED on recovery and
+        not re-enqueued."""
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        store.update(
+            doc.id,
+            extraction_status=ExtractionStatus.FAILED,
+            extraction_error="Processing cancelled",
+        )
+
+        processor = DocumentProcessor(store, max_workers=0)
+        await processor._reenqueue_orphaned_documents()
+
+        assert processor.queue.qsize() == 0
+        migrated = store.read(doc.id)
+        assert migrated.extraction_status == ExtractionStatus.CANCELLED
+        assert migrated.extraction_error is None
 
 
 class TestProcessingResult:

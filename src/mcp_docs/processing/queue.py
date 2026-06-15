@@ -37,6 +37,12 @@ def _is_permanent_failure(error_msg: str) -> bool:
     return any(marker in error_msg for marker in _PERMANENT_FAILURE_MARKERS)
 
 
+# Older versions recorded a cancellation as FAILED with this exact error
+# message (before the dedicated CANCELLED status existed). Recovery migrates
+# such rows to CANCELLED so a cancellation is not re-enqueued after an upgrade.
+_LEGACY_CANCELLED_ERROR = "Processing cancelled"
+
+
 # Maximum number of completed results to keep in memory
 # Prevents unbounded memory growth during long server lifetime
 DEFAULT_MAX_COMPLETED_CACHE = 1000
@@ -222,6 +228,8 @@ class DocumentProcessor:
         """
         try:
             orphaned = []
+            # CANCELLED is intentionally excluded: a user cancelled those
+            # documents, so they must not be re-enqueued on restart.
             for status in (
                 ExtractionStatus.QUEUED,
                 ExtractionStatus.PROCESSING,
@@ -247,6 +255,25 @@ class DocumentProcessor:
 
             skipped = 0
             for doc in orphaned:
+                # Migrate legacy cancellations: older versions stored a
+                # cancellation as FAILED with this error message. Convert them
+                # to the dedicated CANCELLED status and do not re-enqueue, so a
+                # cancellation survives the upgrade to this version.
+                if (
+                    doc.extraction_status == ExtractionStatus.FAILED
+                    and doc.extraction_error == _LEGACY_CANCELLED_ERROR
+                ):
+                    self.document_store.update(
+                        doc.id,
+                        extraction_status=ExtractionStatus.CANCELLED,
+                        extraction_error=None,
+                    )
+                    skipped += 1
+                    logger.debug(
+                        f"Migrated legacy cancelled document {doc.id} to CANCELLED"
+                    )
+                    continue
+
                 # Skip failed docs with permanent (non-retriable) errors
                 if (
                     doc.extraction_status == ExtractionStatus.FAILED
@@ -537,6 +564,7 @@ class DocumentProcessor:
                     ExtractionStatus.EXTRACTED: ProcessingStatus.COMPLETED,
                     ExtractionStatus.INDEXED: ProcessingStatus.COMPLETED,
                     ExtractionStatus.FAILED: ProcessingStatus.FAILED,
+                    ExtractionStatus.CANCELLED: ProcessingStatus.CANCELLED,
                 }
                 db_status = status_map.get(
                     doc.extraction_status, ProcessingStatus.QUEUED
@@ -560,32 +588,48 @@ class DocumentProcessor:
 
     def cancel(self, document_id: UUID) -> bool:
         """
-        Cancel queued processing (cannot cancel in-progress).
+        Cancel a queued document's processing.
+
+        Only documents that are still QUEUED can be cancelled. A document that
+        is actively being processed, already extracted/indexed, failed, or
+        already cancelled is left untouched (returns False) so its status is
+        never clobbered.
 
         Args:
             document_id: Document UUID
 
         Returns:
-            True if cancelled, False if not found or in-progress
+            True if the document was cancelled, False if it was not in a
+            cancellable (queued) state.
         """
-        # Can't cancel in-progress tasks
+        # Can't cancel a task that is actively being processed.
         if document_id in self.in_progress:
             return False
 
-        # Track as cancelled so worker skips it when dequeued
+        # Only QUEUED documents are cancellable. Reading the persisted status
+        # avoids overwriting a document that has already been extracted,
+        # indexed, failed, or cancelled (none of which are in self.in_progress).
+        doc = self.document_store.read(document_id)
+        if doc is None or doc.extraction_status != ExtractionStatus.QUEUED:
+            return False
+
+        # Track as cancelled so the worker skips it if it is already enqueued.
         self.cancelled.add(document_id)
 
-        # Mark as cancelled in DB
+        # Record cancellation as its own terminal state, not FAILED: startup
+        # recovery re-enqueues FAILED documents (which would defeat the
+        # cancellation), and FAILED would misreport the document as an
+        # extraction error.
         try:
             self.document_store.update(
                 document_id,
-                extraction_status=ExtractionStatus.FAILED,
-                extraction_error="Processing cancelled",
+                extraction_status=ExtractionStatus.CANCELLED,
+                extraction_error=None,
             )
             return True
         except Exception as e:
             logger.warning(f"Failed to cancel document {document_id}: {e}")
-            # Still keep in cancelled set to skip processing
+            # Still keep in cancelled set to skip processing this session.
             return False
 
     def list_queued(self) -> list[dict]:

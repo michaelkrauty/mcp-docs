@@ -82,9 +82,11 @@ async def wait_for_document(
 @mcp.tool()
 async def cancel_processing(document_id: str) -> dict:
     """
-    Cancel queued document processing.
+    Cancel a queued document's processing.
 
-    Cannot cancel documents that are already being processed.
+    Only documents that are still queued can be cancelled; a document that is
+    already being processed, extracted, indexed, failed, or cancelled is left
+    unchanged.
 
     Args:
         document_id: Document UUID string
@@ -104,6 +106,7 @@ async def cancel_processing(document_id: str) -> dict:
     else:
         return error_response(
             ErrorCode.CONFLICT,
-            "Cannot cancel: document not in queue or already processing",
+            "Cannot cancel: document is not queued (it may be processing, "
+            "already complete, failed, or cancelled)",
             details={"document_id": document_id},
         )
