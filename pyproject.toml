@@ -1,6 +1,6 @@
 [project]
 name = "mcp-docs"
-version = "1.1.12"
+version = "1.1.13"
 description = "MCP server for document management with vector search"
 readme = "README.md"
 authors = [

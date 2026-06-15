@@ -328,6 +328,152 @@ class TestDeleteDocument:
         assert "not found" in result["message"].lower()
 
 
+class TestRemoveDocumentRootDeletion:
+    """remove_document_root(delete_documents=True) must clean up the index too.
+
+    Regression test for the bug where it deleted the registry rows but left the
+    documents' vectors orphaned in Qdrant (and their fact sources stale).
+    """
+
+    @pytest.mark.asyncio
+    async def test_delete_documents_removes_index_points_and_sources(
+        self, temp_dir: Path
+    ) -> None:
+        import mcp_docs.tools.documents as documents_mod
+        import mcp_docs.tools.roots as roots_mod
+        from mcp_docs.storage.database import DocumentStore
+
+        store = DocumentStore(db_path=temp_dir / "t.db")
+        try:
+            root_dir = temp_dir / "docs"
+            root_dir.mkdir()
+            (root_dir / "a.txt").write_text("a")
+            (root_dir / "b.txt").write_text("b")
+            store.add_root(str(root_dir))
+            d1 = store.register(
+                path=root_dir / "a.txt", content_hash="hash-a",
+                document_root=str(root_dir),
+            )
+            d2 = store.register(
+                path=root_dir / "b.txt", content_hash="hash-b",
+                document_root=str(root_dir),
+            )
+
+            indexer = AsyncMock()
+            integrity = MagicMock()
+            integrity.mark_document_deleted.return_value = 1
+
+            async def fake_get_indexer():
+                return indexer
+
+            with patch.object(roots_mod, "get_document_store", return_value=store), \
+                 patch.object(documents_mod, "get_document_indexer", fake_get_indexer), \
+                 patch.object(
+                     documents_mod, "get_integrity_manager", return_value=integrity
+                 ):
+                result = await roots_mod.remove_document_root(
+                    str(root_dir), delete_documents=True
+                )
+
+            assert result["success"] is True
+            # The fix: vector-index points are purged for BOTH documents
+            # (the bug left these orphaned in Qdrant).
+            purged = {c.args[0] for c in indexer.delete_document_index.call_args_list}
+            assert purged == {d1.id, d2.id}
+            # Fact sources are marked deleted for both content hashes.
+            marked = {c.args[0] for c in integrity.mark_document_deleted.call_args_list}
+            assert marked == {"hash-a", "hash-b"}
+            # Registry rows and the root are gone.
+            assert store.read(d1.id) is None
+            assert store.read(d2.id) is None
+            assert store.get_root(str(root_dir)) is None
+            assert result["documents_deleted"] == 2
+            assert result["sources_marked_deleted"] == 2
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_without_delete_keeps_documents_and_index(
+        self, temp_dir: Path
+    ) -> None:
+        import mcp_docs.tools.documents as documents_mod
+        import mcp_docs.tools.roots as roots_mod
+        from mcp_docs.storage.database import DocumentStore
+
+        store = DocumentStore(db_path=temp_dir / "t.db")
+        try:
+            root_dir = temp_dir / "docs"
+            root_dir.mkdir()
+            (root_dir / "a.txt").write_text("a")
+            store.add_root(str(root_dir))
+            d1 = store.register(
+                path=root_dir / "a.txt", content_hash="hash-a",
+                document_root=str(root_dir),
+            )
+
+            indexer = AsyncMock()
+
+            async def fake_get_indexer():
+                return indexer
+
+            with patch.object(roots_mod, "get_document_store", return_value=store), \
+                 patch.object(documents_mod, "get_document_indexer", fake_get_indexer):
+                result = await roots_mod.remove_document_root(
+                    str(root_dir), delete_documents=False
+                )
+
+            assert result["documents_deleted"] is None
+            assert result["sources_marked_deleted"] is None
+            # Document is kept; nothing purged from the index.
+            assert store.read(d1.id) is not None
+            indexer.delete_document_index.assert_not_called()
+            # Root is still removed.
+            assert store.get_root(str(root_dir)) is None
+        finally:
+            store.close()
+
+
+class TestDeleteDocumentCleanup:
+    """delete_document still removes index points + row via the shared helper."""
+
+    @pytest.mark.asyncio
+    async def test_delete_document_purges_index_and_row(self, temp_dir: Path) -> None:
+        import mcp_docs.tools.documents as documents_mod
+        from mcp_docs.storage.database import DocumentStore
+
+        store = DocumentStore(db_path=temp_dir / "t.db")
+        try:
+            root_dir = temp_dir / "docs"
+            root_dir.mkdir()
+            (root_dir / "a.txt").write_text("a")
+            store.add_root(str(root_dir))
+            doc = store.register(
+                path=root_dir / "a.txt", content_hash="hash-a",
+                document_root=str(root_dir),
+            )
+
+            indexer = AsyncMock()
+            integrity = MagicMock()
+            integrity.mark_document_deleted.return_value = 3
+
+            async def fake_get_indexer():
+                return indexer
+
+            with patch.object(documents_mod, "get_document_store", return_value=store), \
+                 patch.object(documents_mod, "get_document_indexer", fake_get_indexer), \
+                 patch.object(
+                     documents_mod, "get_integrity_manager", return_value=integrity
+                 ):
+                result = await documents_mod.delete_document(str(doc.id))
+
+            assert result["success"] is True
+            assert result["sources_marked_deleted"] == 3
+            indexer.delete_document_index.assert_awaited_once_with(doc.id)
+            assert store.read(doc.id) is None
+        finally:
+            store.close()
+
+
 class TestListDocuments:
     """Tests for document listing."""
 

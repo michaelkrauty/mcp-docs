@@ -214,3 +214,40 @@ class TestDocumentIndexerScrollPoints:
 
         # Should return empty set instead of raising
         assert result == set()
+
+
+class TestDocumentIndexerColdDelete:
+    """delete_document_index must work on a not-yet-initialized indexer."""
+
+    @pytest.mark.asyncio
+    async def test_delete_document_index_initializes_cold_storage(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A cold indexer (storage=None) still purges points rather than
+        silently orphaning them when delete_document_index runs."""
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+
+        from mcp_docs.indexing import indexer as indexer_mod
+        from mcp_docs.indexing.indexer import DocumentIndexer
+        from mcp_docs.storage.database import DocumentStore
+
+        fake_storage = MagicMock()
+        fake_storage.delete_by_filter = AsyncMock()
+        monkeypatch.setattr(indexer_mod, "QdrantStorage", lambda *a, **k: fake_storage)
+        monkeypatch.setattr(indexer_mod, "EmbeddingClient", lambda *a, **k: MagicMock())
+        monkeypatch.setattr(indexer_mod, "GlobalVocabulary", MagicMock())
+
+        indexer = DocumentIndexer(
+            document_store=MagicMock(spec=DocumentStore),
+            collection_name="test_collection",
+        )
+        assert indexer.storage is None  # cold indexer
+
+        doc_id = uuid4()
+        await indexer.delete_document_index(doc_id)
+
+        # Storage was initialized and the points were actually deleted.
+        assert indexer.storage is fake_storage
+        fake_storage.delete_by_filter.assert_awaited_once()
+        assert fake_storage.delete_by_filter.call_args.kwargs.get("value") == str(doc_id)

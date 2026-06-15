@@ -20,6 +20,7 @@ from mcp_docs.singletons import (
     get_document_scanner,
     get_document_store,
 )
+from mcp_docs.tools.documents import delete_document_artifacts
 
 
 @mcp.tool()
@@ -159,12 +160,17 @@ async def remove_document_root(
     if root is None:
         return error_response(ErrorCode.NOT_FOUND, f"Root not found: {path}")
 
-    # Optionally delete documents
+    # Optionally delete documents. Remove each document fully — its
+    # vector-index points and fact-source links, not just the registry row —
+    # so deleting a root never orphans searchable points in Qdrant.
     deleted_count = 0
+    sources_marked = 0
     if delete_documents:
         docs = store.list_summaries(document_root=str(root_path), limit=10000)
         for doc in docs:
-            store.delete(doc.id)
+            sources_marked += await delete_document_artifacts(
+                store, doc.id, doc.content_hash
+            )
             deleted_count += 1
 
     # Remove the root
@@ -174,6 +180,7 @@ async def remove_document_root(
         "success": True,
         "removed_path": str(root_path),
         "documents_deleted": deleted_count if delete_documents else None,
+        "sources_marked_deleted": sources_marked if delete_documents else None,
     }
 
 
