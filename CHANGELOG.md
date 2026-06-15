@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.15] - 2026-06-14
+
+### Fixed
+
+- **`index_all_documents` now indexes the entire extracted corpus instead of only the 50 most recently touched documents.** `DocumentIndexer.index_all()` enumerated documents with `DocumentStore.query()`, whose default `limit` is 50, so any backlog of more than 50 extracted-but-unindexed documents was silently truncated and most documents never entered the search index. The background indexing pass that runs at startup goes through the same code path and hit the same cap. Indexing now streams the full corpus through a filtered form of `DocumentStore.iter_all(extraction_status=...)`, which applies no row limit, skips an individual unreadable row rather than aborting, and lets a systemic database error propagate instead of masquerading as an empty corpus. This is the document-side counterpart of the facts fix shipped in vector-core v1.2.6.
+
 ## [1.1.14] - 2026-06-14
 
 ### Fixed
