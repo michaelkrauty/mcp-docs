@@ -11,6 +11,7 @@ Tools:
 
 import logging
 from pathlib import Path
+from uuid import UUID
 
 from vector_core import parse_uuid_or_none, validate_limit
 from vector_core.errors import ErrorCode, error_response
@@ -23,7 +24,7 @@ from mcp_docs.singletons import (
     get_document_store,
     get_integrity_manager,
 )
-from mcp_docs.storage.database import compute_file_hash
+from mcp_docs.storage.database import DocumentStore, compute_file_hash
 from mcp_docs.tools._validation import validate_doc_type
 
 logger = logging.getLogger(__name__)
@@ -172,6 +173,47 @@ async def update_document_tags(
     return updated.to_dict()
 
 
+async def delete_document_artifacts(
+    store: DocumentStore,
+    document_id: UUID,
+    content_hash: str | None,
+) -> int:
+    """Remove one document's side effects, then its registry row.
+
+    Marks any fact sources that cite the document's content hash as deleted,
+    removes the document's points from the vector index, and deletes the
+    registry row. Index and fact-source cleanup are best-effort (failures are
+    logged) so a transient backend error never blocks removal of the row, but
+    the vector-index cleanup is always attempted. Returns the number of fact
+    sources marked deleted.
+
+    Shared by delete_document and remove_document_root so both deletion paths
+    clean up identically; a prior divergence left remove_document_root deleting
+    registry rows while orphaning their vector-index points.
+    """
+    sources_marked = 0
+    if content_hash:
+        try:
+            integrity = get_integrity_manager()
+            sources_marked = integrity.mark_document_deleted(content_hash)
+            if sources_marked > 0:
+                logger.info(
+                    f"Marked {sources_marked} fact sources as deleted "
+                    f"for document {content_hash[:16]}..."
+                )
+        except Exception as e:
+            logger.warning(f"Failed to mark fact sources as deleted: {e}")
+
+    try:
+        indexer = await get_document_indexer()
+        await indexer.delete_document_index(document_id)
+    except Exception as e:
+        logger.warning(f"Failed to delete document index: {e}")
+
+    store.delete(document_id)
+    return sources_marked
+
+
 @mcp.tool()
 async def delete_document(document_id: str) -> dict:
     """
@@ -196,30 +238,7 @@ async def delete_document(document_id: str) -> dict:
     if document is None:
         return error_response(ErrorCode.NOT_FOUND, f"Document not found: {document_id}")
 
-    # Mark fact sources as deleted (before deleting so we have the hash)
-    content_hash = document.content_hash
-    sources_marked = 0
-    if content_hash:
-        try:
-            integrity = get_integrity_manager()
-            sources_marked = integrity.mark_document_deleted(content_hash)
-            if sources_marked > 0:
-                logger.info(
-                    f"Marked {sources_marked} fact sources as deleted "
-                    f"for document {content_hash[:16]}..."
-                )
-        except Exception as e:
-            logger.warning(f"Failed to mark fact sources as deleted: {e}")
-
-    # Clean up vector index
-    try:
-        indexer = await get_document_indexer()
-        await indexer.delete_document_index(uuid)
-    except Exception as e:
-        logger.warning(f"Failed to delete document index: {e}")
-
-    # Delete from registry
-    store.delete(uuid)
+    sources_marked = await delete_document_artifacts(store, uuid, document.content_hash)
 
     return {
         "success": True,

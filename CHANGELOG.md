@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.13] - 2026-06-14
+
+### Fixed
+
+- **Removing a document root with `delete_documents=True` no longer leaves the deleted documents' vectors orphaned in the search index.** `remove_document_root` deleted each document's registry row but never removed its points from Qdrant or marked its fact sources deleted, so those vectors stayed searchable while pointing at documents that no longer existed. Document deletion is now centralized in a shared helper used by both `delete_document` and `remove_document_root`, so removing a root cleans up vector-index points and fact-source links the same way single-document deletion does. The response also reports `sources_marked_deleted`.
+
 ## [1.1.12] - 2026-06-14
 
 ### Fixed

@@ -417,6 +417,11 @@ class DocumentIndexer:
 
     async def _delete_document_points(self, document_id: UUID) -> None:
         """Delete all points for a document."""
+        # Ensure storage is initialized: this path may run on a cold indexer
+        # (e.g. delete_document / remove_document_root right after startup),
+        # and without this the missing storage would raise and be swallowed
+        # below, silently orphaning the points.
+        await self._ensure_components()
         try:
             await self.storage.delete_by_filter(
                 self.collection_name,
