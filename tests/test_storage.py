@@ -1,7 +1,7 @@
 """Tests for document storage."""
 
+import sqlite3
 import tempfile
-from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -479,3 +479,115 @@ class TestExtractionErrorSentinel:
         store.update(doc.id, title="new title")
 
         assert store.read(doc.id).extraction_error == "boom"
+
+
+class TestIterAll:
+    """iter_all() must yield the entire matching corpus (no 50-row cap), filter
+    by extraction status, and survive individual unreadable rows while staying
+    loud on systemic database errors.
+
+    This underpins the index_all fix: index_all only indexed the first 50
+    extracted documents because it enumerated via the 50-capped query() instead
+    of iter_all().
+    """
+
+    def _make_extracted(
+        self, store: DocumentStore, temp_dir: Path, n: int
+    ) -> list[UUID]:
+        ids: list[UUID] = []
+        for i in range(n):
+            f = temp_dir / f"iter_doc_{i}.txt"
+            f.write_text(f"content {i}")
+            doc = store.register(f)
+            store.update(doc.id, extraction_status=ExtractionStatus.EXTRACTED)
+            ids.append(doc.id)
+        return ids
+
+    def test_yields_more_than_default_query_limit(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        """iter_all returns the whole corpus, well past query()'s default 50."""
+        self._make_extracted(store, temp_dir, 60)
+
+        assert len(list(store.iter_all())) == 60
+
+    def test_filters_by_extraction_status(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        """Only documents in the requested extraction state are yielded."""
+        extracted = set(self._make_extracted(store, temp_dir, 5))
+        # Three more left in the default QUEUED state.
+        for i in range(3):
+            f = temp_dir / f"queued_{i}.txt"
+            f.write_text(f"queued {i}")
+            store.register(f)
+
+        seen = {
+            d.id
+            for d in store.iter_all(extraction_status=ExtractionStatus.EXTRACTED)
+        }
+
+        assert seen == extracted
+
+    def test_skips_vanished_document(
+        self,
+        store: DocumentStore,
+        temp_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A row whose read() returns None (deleted between the id snapshot and
+        its read) is skipped, not yielded as None."""
+        gone, kept = self._make_extracted(store, temp_dir, 2)
+        real_read = store.read
+
+        def flaky_read(document_id: UUID):
+            return None if document_id == gone else real_read(document_id)
+
+        monkeypatch.setattr(store, "read", flaky_read)
+
+        seen = [d.id for d in store.iter_all()]
+
+        assert gone not in seen
+        assert seen == [kept]
+
+    def test_skips_unreadable_document(
+        self,
+        store: DocumentStore,
+        temp_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A malformed row (read raises ValueError) is skipped rather than
+        aborting iteration over the rest of the corpus."""
+        bad, good = self._make_extracted(store, temp_dir, 2)
+        real_read = store.read
+
+        def flaky_read(document_id: UUID):
+            if document_id == bad:
+                raise ValueError("malformed stored row")
+            return real_read(document_id)
+
+        monkeypatch.setattr(store, "read", flaky_read)
+
+        seen = [d.id for d in store.iter_all()]
+
+        assert bad not in seen
+        assert seen == [good]
+
+    def test_propagates_systemic_db_error(
+        self,
+        store: DocumentStore,
+        temp_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A systemic DB failure must propagate, not be swallowed as one bad
+        row: otherwise a force reindex sees an empty corpus and deletes every
+        point."""
+        self._make_extracted(store, temp_dir, 1)
+
+        def locked_read(document_id: UUID):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(store, "read", locked_read)
+
+        with pytest.raises(sqlite3.OperationalError):
+            list(store.iter_all())

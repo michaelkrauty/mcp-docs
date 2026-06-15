@@ -172,9 +172,11 @@ class DocumentIndexer:
         await self._ensure_components()
         await self.ensure_collection()
 
-        # Get all extracted documents
-        docs_to_index = self.document_store.query(
-            extraction_status=ExtractionStatus.EXTRACTED,
+        # Index the entire extracted corpus. iter_all() streams every extracted
+        # document; query()/list_summaries() default to a 50-row limit and would
+        # silently truncate a larger backlog.
+        docs_to_index = list(
+            self.document_store.iter_all(extraction_status=ExtractionStatus.EXTRACTED)
         )
 
         if not docs_to_index:

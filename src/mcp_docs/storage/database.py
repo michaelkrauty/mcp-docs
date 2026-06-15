@@ -753,12 +753,64 @@ class DocumentStore(ThreadSafeSQLiteStore):
         cursor = conn.execute("SELECT COUNT(*) FROM documents")
         return cursor.fetchone()[0]
 
-    def iter_all(self) -> Iterator[Document]:
-        """Iterate over all documents."""
+    def iter_all(
+        self, extraction_status: ExtractionStatus | None = None
+    ) -> Iterator[Document]:
+        """
+        Iterate over every document, optionally filtered by extraction status.
+
+        Unlike ``query()`` and ``list_summaries()`` (which default to a 50-row
+        limit), this yields the entire matching corpus, so callers that must
+        process all documents (index_all in particular) are never silently
+        capped.
+
+        The id list is snapshotted up front and each document is read lazily.
+        A document that cannot be loaded (deleted by another writer between the
+        snapshot and its read, or a malformed stored row) is skipped rather
+        than aborting iteration over the rest. A failure of the initial id
+        query itself is not swallowed: it propagates, so a systemic read
+        failure such as a locked database stays loud instead of masquerading
+        as an empty corpus.
+
+        Args:
+            extraction_status: If given, only yield documents in this state.
+
+        Yields:
+            Document for each readable document.
+        """
         conn = self._get_conn()
-        cursor = conn.execute("SELECT id FROM documents ORDER BY indexed_at DESC")
+        if extraction_status is not None:
+            cursor = conn.execute(
+                "SELECT id FROM documents WHERE extraction_status = ? "
+                "ORDER BY indexed_at DESC",
+                (extraction_status.value,),
+            )
+        else:
+            cursor = conn.execute("SELECT id FROM documents ORDER BY indexed_at DESC")
+
         for row in cursor.fetchall():
-            yield self.read(UUID(row[0]))
+            try:
+                document = self.read(UUID(row[0]))
+            except sqlite3.Error:
+                # Systemic DB failure (e.g. database is locked). Must NOT be
+                # swallowed as a single bad row: that would yield a partial
+                # corpus and let a force reindex delete points for everything
+                # that failed to load. Fail loud.
+                raise
+            except (ValueError, KeyError, TypeError):
+                # Malformed stored row (bad uuid/enum/date). Skip just this
+                # document rather than aborting iteration over the rest.
+                logger.warning(
+                    "Skipping unreadable document %s during iter_all",
+                    row[0],
+                    exc_info=True,
+                )
+                continue
+            if document is None:
+                # Deleted between the id snapshot and this read; skip it.
+                logger.debug("Document %s vanished during iter_all, skipping", row[0])
+                continue
+            yield document
 
     def get_by_path(self, path: str) -> Document | None:
         """

@@ -251,3 +251,55 @@ class TestDocumentIndexerColdDelete:
         assert indexer.storage is fake_storage
         fake_storage.delete_by_filter.assert_awaited_once()
         assert fake_storage.delete_by_filter.call_args.kwargs.get("value") == str(doc_id)
+
+
+class TestIndexAllCompleteCorpus:
+    """index_all must index every extracted document, not just the 50 most
+    recent. Regression for the silent 50-document cap: index_all enumerated via
+    the 50-capped query() instead of the unbounded iter_all()."""
+
+    @pytest.mark.asyncio
+    async def test_index_all_enumerates_entire_extracted_corpus(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """All extracted documents are enumerated via iter_all(); the capped
+        query() is not used."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from mcp_docs.indexing.indexer import DocumentIndexer
+        from mcp_docs.models import ExtractionStatus
+        from mcp_docs.storage.database import DocumentStore
+
+        n = 60
+        # Documents whose files are absent: each fails Pass-1 extraction, so
+        # index_all returns early with one error per enumerated document and
+        # never needs a real embedder or Qdrant. The error count therefore
+        # equals how many documents were enumerated.
+        docs = [
+            MagicMock(
+                path=f"/nonexistent/iter_doc_{i}.txt",
+                filename=f"iter_doc_{i}.txt",
+            )
+            for i in range(n)
+        ]
+
+        mock_store = MagicMock(spec=DocumentStore)
+        mock_store.iter_all.return_value = iter(docs)
+        # The capped path would have yielded only the first 50.
+        mock_store.query.return_value = list(docs[:50])
+        mock_store.count.return_value = n
+
+        indexer = DocumentIndexer(
+            document_store=mock_store, collection_name="test_collection"
+        )
+        monkeypatch.setattr(indexer, "_ensure_components", AsyncMock())
+        monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
+
+        result = await indexer.index_all(force=True)
+
+        mock_store.iter_all.assert_called_once_with(
+            extraction_status=ExtractionStatus.EXTRACTED
+        )
+        mock_store.query.assert_not_called()
+        # One "file not found" error per enumerated document: all 60, not 50.
+        assert len(result["errors"]) == n
