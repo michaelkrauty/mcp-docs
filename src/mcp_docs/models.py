@@ -71,6 +71,7 @@ class ExtractionStatus(str, Enum):
     EXTRACTED = "extracted"  # Successfully extracted
     INDEXED = "indexed"  # Extracted and indexed
     FAILED = "failed"  # Extraction failed
+    CANCELLED = "cancelled"  # Processing cancelled before completion
 
 
 class DocumentError(Exception):

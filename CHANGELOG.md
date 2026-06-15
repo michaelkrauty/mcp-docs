@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.16] - 2026-06-14
+
+### Fixed
+
+- **`cancel_processing` no longer marks documents as failed, and no longer clobbers documents that are not actually queued.** `DocumentProcessor.cancel()` refused only documents that were currently being processed; for anything else it unconditionally set `extraction_status=failed`. Two problems followed: a document that was already extracted or indexed (so not in progress) had its good status overwritten with `failed`, and because startup recovery re-enqueues failed documents, a cancelled document was reprocessed on the next restart, defeating the cancellation and misreporting it as an extraction error. Cancellation is now guarded to act only on documents that are still `queued`, returns a conflict for anything already processing, complete, failed, or cancelled, and records a dedicated `cancelled` extraction status, which recovery does not re-enqueue. A `cancelled` value was added to the `ExtractionStatus` enum and is surfaced by `get_processing_status`. Documents cancelled by a previous version (stored as `failed`) are migrated to `cancelled` during startup recovery so they are no longer re-enqueued.
+
 ## [1.1.15] - 2026-06-14
 
 ### Fixed
