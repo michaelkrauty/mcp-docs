@@ -1,10 +1,12 @@
 """Tests for document scanning."""
 
+import os
 import tempfile
 from pathlib import Path
 
 import pytest
 
+from mcp_docs.models import DocumentStatus
 from mcp_docs.scanning import DocumentScanner, ScanResult
 from mcp_docs.storage.database import DocumentStore
 
@@ -249,6 +251,211 @@ class TestDocumentScanner:
         assert "does not exist" in result.errors[0]
 
 
+class TestIncompleteScanDeletionSafety:
+    """A scan that does not finish must never reconcile deletions.
+
+    Regression tests for the data-loss bug where a walk truncated by the
+    per-root file limit, or aborted by an error mid-traversal, left
+    ``seen_paths`` incomplete and the deletion pass then marked every
+    unvisited (but still on-disk) document as DELETED and purged its vectors.
+    """
+
+    @pytest.mark.asyncio
+    async def test_complete_flag_true_on_normal_scan(
+        self, store: DocumentStore, document_root: Path
+    ) -> None:
+        """A full walk reports complete=True and still reconciles deletions."""
+        scanner = DocumentScanner(store, recursive=True)
+        root = store.add_root(str(document_root))
+
+        result = await scanner.scan_root(root)
+        assert result.complete is True
+
+        # A genuinely removed file is still marked deleted on a complete scan.
+        (document_root / "file1.txt").unlink()
+        result2 = await scanner.scan_root(root)
+        assert result2.complete is True
+        assert result2.files_deleted == 1
+
+    @pytest.mark.asyncio
+    async def test_file_limit_truncation_skips_deletion(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        store: DocumentStore,
+        document_root: Path,
+    ) -> None:
+        """Hitting MAX_FILES_PER_ROOT must not delete the unvisited documents."""
+        scanner = DocumentScanner(store, recursive=True)
+        root = store.add_root(str(document_root))
+
+        # Full scan registers all three supported files.
+        registered: dict[str, object] = {}
+
+        async def enqueue(doc_id, path):
+            registered[str(path)] = doc_id
+
+        await scanner.scan_root(root, enqueue_callback=enqueue)
+        assert len(registered) == 3
+
+        # Cap the walk at a single file: the other two are never visited.
+        monkeypatch.setattr("mcp_docs.scanning.scanner.MAX_FILES_PER_ROOT", 1)
+
+        deleted_ids: list[object] = []
+
+        async def delete_callback(doc_id):
+            deleted_ids.append(doc_id)
+
+        result = await scanner.scan_root(root, delete_callback=delete_callback)
+
+        # The unvisited documents must NOT be deleted or purged from the index.
+        assert result.files_deleted == 0
+        assert deleted_ids == []
+        # No registered document was marked deleted.
+        for doc_id in registered.values():
+            assert store.read(doc_id).status != DocumentStatus.DELETED
+        # ...and the scan must report itself incomplete.
+        assert result.complete is False
+        assert any("incomplete" in e.lower() for e in result.errors)
+
+    @pytest.mark.asyncio
+    async def test_walk_error_skips_deletion(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        store: DocumentStore,
+        document_root: Path,
+    ) -> None:
+        """An error during directory traversal must not delete any document."""
+        scanner = DocumentScanner(store, recursive=True)
+        root = store.add_root(str(document_root))
+
+        registered: dict[str, object] = {}
+
+        async def enqueue(doc_id, path):
+            registered[str(path)] = doc_id
+
+        await scanner.scan_root(root, enqueue_callback=enqueue)
+        assert len(registered) == 3
+
+        def failing_walk(*args, **kwargs):
+            raise OSError("simulated traversal failure")
+
+        monkeypatch.setattr("os.walk", failing_walk)
+
+        deleted_ids: list[object] = []
+
+        async def delete_callback(doc_id):
+            deleted_ids.append(doc_id)
+
+        result = await scanner.scan_root(root, delete_callback=delete_callback)
+
+        # No document may be deleted or purged when traversal fails.
+        assert result.files_deleted == 0
+        assert deleted_ids == []
+        for doc_id in registered.values():
+            assert store.read(doc_id).status != DocumentStatus.DELETED
+        assert result.complete is False
+
+    @pytest.mark.asyncio
+    async def test_missing_root_reports_incomplete(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        """A root that does not exist reports complete=False (no walk ran)."""
+        scanner = DocumentScanner(store)
+        root = store.add_root(str(temp_dir / "gone"))
+
+        result = await scanner.scan_root(root)
+
+        assert result.complete is False
+        assert result.files_deleted == 0
+
+    @pytest.mark.asyncio
+    async def test_non_directory_root_reports_incomplete(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        """A root path that is a file (not a directory) reports complete=False."""
+        file_root = temp_dir / "not_a_dir.txt"
+        file_root.write_text("regular file")
+        scanner = DocumentScanner(store)
+        root = store.add_root(str(file_root))
+
+        result = await scanner.scan_root(root)
+
+        assert result.complete is False
+        assert result.files_deleted == 0
+
+    @pytest.mark.skipif(
+        not hasattr(os, "geteuid") or os.geteuid() == 0,
+        reason="requires non-root POSIX (chmod-based permission denial)",
+    )
+    @pytest.mark.asyncio
+    async def test_unreadable_subdir_skips_deletion(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        """A subdir that becomes unreadable must not delete documents inside it.
+
+        ``os.walk`` (like pathlib) silently omits the children of a directory
+        it cannot list rather than raising, so the scan must detect the
+        ``onerror`` callback and refuse to reconcile deletions.
+        """
+        root = temp_dir / "docs"
+        sub = root / "sub"
+        sub.mkdir(parents=True)
+        (root / "top.txt").write_text("top level")
+        (sub / "child.txt").write_text("child document")
+
+        scanner = DocumentScanner(store, recursive=True)
+        docroot = store.add_root(str(root))
+
+        ids_by_name: dict[str, object] = {}
+
+        async def enqueue(doc_id, path):
+            ids_by_name[Path(path).name] = doc_id
+
+        result1 = await scanner.scan_root(docroot, enqueue_callback=enqueue)
+        assert result1.complete is True
+        assert set(ids_by_name) == {"top.txt", "child.txt"}
+        child_id = ids_by_name["child.txt"]
+
+        # Make the subdirectory unreadable: its child can no longer be listed.
+        sub.chmod(0)
+        try:
+            deleted_ids: list[object] = []
+
+            async def delete_callback(doc_id):
+                deleted_ids.append(doc_id)
+
+            result2 = await scanner.scan_root(docroot, delete_callback=delete_callback)
+        finally:
+            sub.chmod(0o700)
+
+        # The child under the unreadable subdir must survive untouched.
+        assert result2.complete is False
+        assert result2.files_deleted == 0
+        assert deleted_ids == []
+        assert store.read(child_id).status != DocumentStatus.DELETED
+
+    @pytest.mark.asyncio
+    async def test_scan_all_roots_failure_reports_incomplete(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        store: DocumentStore,
+        document_root: Path,
+    ) -> None:
+        """If scan_root raises, scan_all_roots reports that root incomplete."""
+        scanner = DocumentScanner(store, recursive=True)
+        store.add_root(str(document_root))
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("simulated scan failure")
+
+        monkeypatch.setattr(scanner, "scan_root", boom)
+
+        results = await scanner.scan_all_roots()
+
+        assert len(results) == 1
+        assert results[0].complete is False
+
+
 class TestScanResult:
     """Tests for ScanResult."""
 
@@ -274,3 +481,13 @@ class TestScanResult:
         assert d["files_modified"] == 2
         assert d["files_deleted"] == 1
         assert d["files_skipped"] == 3
+
+    def test_to_dict_includes_complete(self) -> None:
+        """to_dict surfaces the completeness flag (defaults True)."""
+        from datetime import UTC, datetime
+
+        result = ScanResult(root_path="/p", scanned_at=datetime.now(UTC))
+        assert result.to_dict()["complete"] is True
+
+        result.complete = False
+        assert result.to_dict()["complete"] is False
