@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.18] - 2026-06-15
+
+### Fixed
+
+- **`update_document_tags` now updates the search index, so tag filters and search results no longer go stale after a tag change.** The tool wrote the new tags to the document registry but never updated the vector index. Each point carries a `tags` payload used to filter searches (`search_documents(tags=...)`) and to report a result's tags, and the document summary point additionally embeds the tags in its searchable content. After a tag change both the filter metadata and the indexed content stayed stale, so searches would still match the old tags, miss the new ones, and show the stale set until a full reindex. The tool now synchronizes the change through a new `DocumentIndexer.update_document_tags_in_index`, which updates the `tags` payload on every one of the document's points and, when the document is indexed, regenerates the summary point so its content and vectors reflect the new tags. The synchronization is metadata-only (it does not need the source file) and best-effort, so a transient backend error does not block the registry update.
+
 ## [1.1.17] - 2026-06-14
 
 ### Fixed
