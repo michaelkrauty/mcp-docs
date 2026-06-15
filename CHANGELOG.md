@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.17] - 2026-06-14
+
+### Fixed
+
+- **`wait_for_document` now returns immediately for a document that already finished, instead of blocking until the timeout.** `DocumentProcessor.wait_for` only consulted the in-memory completed cache, which does not survive a restart. A document that was extracted, indexed, failed, or cancelled in a previous session was therefore not cached, so `wait_for` created a wait event and blocked for the full timeout (300 seconds by default) waiting for a worker event that would never fire, then reported a timeout for a document that was actually done. It now also checks the persisted extraction status and resolves a terminal document (`extracted`/`indexed` as completed, `failed`, or `cancelled`) from the database right away; queued and processing documents still wait as before. The extraction-to-processing status mapping is now shared between `wait_for` and `get_processing_status` so the two cannot drift.
+
 ## [1.1.16] - 2026-06-14
 
 ### Fixed

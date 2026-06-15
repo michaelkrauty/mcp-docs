@@ -62,6 +62,31 @@ class ProcessingStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+# Maps a document's persisted extraction status to a processing status. Shared
+# by get_status and wait_for so the two cannot drift apart.
+_EXTRACTION_TO_PROCESSING = {
+    ExtractionStatus.QUEUED: ProcessingStatus.QUEUED,
+    ExtractionStatus.PROCESSING: ProcessingStatus.PROCESSING,
+    ExtractionStatus.EXTRACTED: ProcessingStatus.COMPLETED,
+    ExtractionStatus.INDEXED: ProcessingStatus.COMPLETED,
+    ExtractionStatus.FAILED: ProcessingStatus.FAILED,
+    ExtractionStatus.CANCELLED: ProcessingStatus.CANCELLED,
+}
+
+# Extraction statuses that mean processing has finished (successfully or not).
+# wait_for resolves these from the database immediately instead of waiting for
+# a worker event that will never fire (e.g. for a document processed in a
+# previous session, before the in-memory completed cache existed).
+_TERMINAL_EXTRACTION_STATUSES = frozenset(
+    {
+        ExtractionStatus.EXTRACTED,
+        ExtractionStatus.INDEXED,
+        ExtractionStatus.FAILED,
+        ExtractionStatus.CANCELLED,
+    }
+)
+
+
 @dataclass
 class ProcessingTask:
     """A document processing task."""
@@ -456,9 +481,24 @@ class DocumentProcessor:
         """
         # Use lock for atomic check-and-create of wait event
         async with self._wait_lock:
-            # Already completed?
+            # Already completed in this session's in-memory cache?
             if document_id in self.completed:
                 return self.completed[document_id]
+
+            # Already finished in a previous session? The completed cache is
+            # in-memory only, so after a restart a document that is already
+            # extracted/indexed/failed/cancelled is not cached. Resolve it from
+            # the database immediately rather than blocking until timeout for a
+            # worker event that will never fire.
+            #
+            # Only trust the DB shortcut for documents NOT currently being
+            # processed: a worker sets the status to EXTRACTED before it
+            # finishes auto-indexing, so an in-progress document must stay on
+            # the event path until the worker signals true completion.
+            if document_id not in self.in_progress:
+                terminal = self._terminal_result_from_db(document_id)
+                if terminal is not None:
+                    return terminal
 
             # Create wait event if needed (atomic with completed check)
             if document_id not in self.waiting:
@@ -475,6 +515,37 @@ class DocumentProcessor:
             self.waiting.pop(document_id, None)
             logger.warning(f"Timeout waiting for document {document_id}")
             return None
+
+    def _terminal_result_from_db(self, document_id: UUID) -> ProcessingResult | None:
+        """
+        Build a ProcessingResult for a document already in a terminal state in
+        the database, or None if it is not found or still queued/processing.
+
+        This lets wait_for resolve immediately for a document finished in a
+        previous session, since the in-memory completed cache does not survive
+        a restart.
+        """
+        try:
+            doc = self.document_store.read(document_id)
+        except Exception as e:
+            logger.debug(f"wait_for DB status check failed for {document_id}: {e}")
+            return None
+
+        if doc is None or doc.extraction_status not in _TERMINAL_EXTRACTION_STATUSES:
+            return None
+
+        status = _EXTRACTION_TO_PROCESSING[doc.extraction_status]
+        finished_at = doc.indexed_at
+        return ProcessingResult(
+            document_id=document_id,
+            status=status,
+            started_at=finished_at,
+            completed_at=finished_at,
+            title=doc.title,
+            page_count=doc.page_count,
+            word_count=doc.word_count,
+            error=doc.extraction_error if status == ProcessingStatus.FAILED else None,
+        )
 
     async def wait_for_documents(self, document_ids: list[UUID], timeout: float = 60.0) -> bool:
         """
@@ -558,15 +629,7 @@ class DocumentProcessor:
         try:
             doc = self.document_store.read(document_id)
             if doc is not None:
-                status_map = {
-                    ExtractionStatus.QUEUED: ProcessingStatus.QUEUED,
-                    ExtractionStatus.PROCESSING: ProcessingStatus.PROCESSING,
-                    ExtractionStatus.EXTRACTED: ProcessingStatus.COMPLETED,
-                    ExtractionStatus.INDEXED: ProcessingStatus.COMPLETED,
-                    ExtractionStatus.FAILED: ProcessingStatus.FAILED,
-                    ExtractionStatus.CANCELLED: ProcessingStatus.CANCELLED,
-                }
-                db_status = status_map.get(
+                db_status = _EXTRACTION_TO_PROCESSING.get(
                     doc.extraction_status, ProcessingStatus.QUEUED
                 )
                 result_dict: dict = {
