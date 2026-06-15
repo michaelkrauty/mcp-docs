@@ -408,6 +408,66 @@ class TestMoveDirectory:
         # Check indexer called
         mock_indexer.update_paths_batch_in_index.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_move_directory_rejects_source_outside_root(
+        self,
+        mock_store: DocumentStore,
+        mock_processor: AsyncMock,
+        mock_indexer: AsyncMock,
+        temp_dir: Path,
+    ):
+        """A source directory outside every document root is rejected, unmoved."""
+        dest_root = temp_dir / "dest_root"
+        dest_root.mkdir()
+        mock_store.add_root(str(dest_root), name="Dest Root")
+
+        # Source lives outside any registered root.
+        outside = temp_dir / "outside"
+        outside.mkdir()
+        (outside / "file.txt").write_text("content")
+        dest_dir = dest_root / "moved"
+
+        result = await move_directory(str(outside), str(dest_dir))
+
+        assert "error_code" in result
+        assert result["error_code"] == ErrorCode.PERMISSION_DENIED.value
+        # Nothing was moved and the index was not touched.
+        assert outside.exists()
+        assert not dest_dir.exists()
+        mock_indexer.update_paths_batch_in_index.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_move_directory_rejects_dest_outside_root(
+        self,
+        mock_store: DocumentStore,
+        mock_processor: AsyncMock,
+        mock_indexer: AsyncMock,
+        temp_dir: Path,
+    ):
+        """A destination outside every document root is rejected, unmoved."""
+        source_root = temp_dir / "source_root"
+        source_root.mkdir()
+        mock_store.add_root(str(source_root), name="Source Root")
+        source_dir = source_root / "moveme"
+        source_dir.mkdir()
+        file1 = source_dir / "file1.txt"
+        file1.write_text("content 1")
+        mock_store.register(file1)
+
+        # Destination is outside any registered root.
+        outside_parent = temp_dir / "outside"
+        outside_parent.mkdir()
+        dest_dir = outside_parent / "moved"
+
+        result = await move_directory(str(source_dir), str(dest_dir))
+
+        assert "error_code" in result
+        assert result["error_code"] == ErrorCode.PERMISSION_DENIED.value
+        # Nothing was moved and the index was not touched.
+        assert source_dir.exists()
+        assert not dest_dir.exists()
+        mock_indexer.update_paths_batch_in_index.assert_not_called()
+
 
 class TestDeleteDirectory:
     """Tests for delete_directory tool."""

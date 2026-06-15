@@ -351,11 +351,30 @@ async def move_directory(source_path: str, destination_path: str) -> dict:
         if dest.exists():
             return error_response(ErrorCode.CONFLICT, f"Destination already exists: {dest}")
 
-        # 3. Query all documents under source path
+        # 3. Validate both source and destination are within document roots.
+        # Without this, move_directory would operate on arbitrary filesystem
+        # paths (unlike move_file/rename_directory) and, when the destination
+        # falls outside every root, would leave the moved documents pointing at
+        # a document_root that no longer contains them.
+        source_valid, source_root = _validate_within_root(source, store)
+        if not source_valid:
+            return error_response(
+                ErrorCode.PERMISSION_DENIED,
+                f"Source path not in document root: {source_root}",
+            )
+
+        dest_valid, dest_root_result = _validate_within_root(dest, store)
+        if not dest_valid:
+            return error_response(
+                ErrorCode.PERMISSION_DENIED,
+                f"Destination path not in document root: {dest_root_result}",
+            )
+
+        # 4. Query all documents under source path
         docs_to_update = store.query_by_path_prefix(str(source) + "/")
 
         if docs_to_update:
-            # 4. Wait for any processing docs to complete
+            # 5. Wait for any processing docs to complete
             doc_ids = [doc.id for doc in docs_to_update]
             processing_complete = await processor.wait_for_documents(doc_ids, timeout=120.0)
             if not processing_complete:
@@ -364,23 +383,23 @@ async def move_directory(source_path: str, destination_path: str) -> dict:
                     "Document processing did not complete within timeout",
                 )
 
-        # 5. Move directory
+        # 6. Move directory
         try:
             shutil.move(str(source), str(dest))
         except OSError as e:
             return error_response(ErrorCode.INVALID_INPUT, f"Failed to move directory: {e}")
 
-        # 6. Update document paths in batch
+        # 7. Update document paths in batch
         old_prefix = str(source)
         new_prefix = str(dest)
         docs_updated = store.update_paths_batch(old_prefix, new_prefix)
 
-        # 7. Update document_root if needed
+        # 8. Update document_root if needed
         new_root = _find_document_root(dest, store)
         if new_root:
             store.update_document_roots_batch(new_prefix, new_root)
 
-        # 8. Update vector index paths in batch
+        # 9. Update vector index paths in batch
         await indexer.update_paths_batch_in_index(old_prefix, new_prefix)
 
         logger.info(f"Moved directory {source} -> {dest}, updated {docs_updated} documents")

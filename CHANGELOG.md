@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.14] - 2026-06-14
+
+### Fixed
+
+- **`move_directory` now validates that both the source and destination are within a registered document root**, matching `move_file`, `rename_directory`, and `create_directory`. Previously it would move any directory on the filesystem and rewrite document paths even when the paths were outside every document root; when the destination fell outside all roots, the moved documents kept a `document_root` that no longer contained them, leaving the registry inconsistent. Out-of-root source or destination paths are now rejected with a `PERMISSION_DENIED` error before anything is moved.
+
 ## [1.1.13] - 2026-06-14
 
 ### Fixed
