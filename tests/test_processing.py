@@ -368,6 +368,92 @@ class TestCancel:
         assert migrated.extraction_error is None
 
 
+class TestWaitForTerminal:
+    """wait_for must resolve immediately for a document already in a terminal
+    state in the database (e.g. one processed in a previous session, before the
+    in-memory completed cache existed), instead of blocking until timeout for a
+    worker event that will never fire."""
+
+    @pytest.mark.asyncio
+    async def test_returns_completed_for_indexed(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        store.update(doc.id, extraction_status=ExtractionStatus.INDEXED)
+
+        processor = DocumentProcessor(store, max_workers=0)
+        result = await processor.wait_for(doc.id, timeout=1.0)
+
+        assert result is not None
+        assert result.status == ProcessingStatus.COMPLETED
+        # No stale wait event was created.
+        assert doc.id not in processor.waiting
+
+    @pytest.mark.asyncio
+    async def test_returns_failed_with_error(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        store.update(
+            doc.id,
+            extraction_status=ExtractionStatus.FAILED,
+            extraction_error="boom",
+        )
+
+        processor = DocumentProcessor(store, max_workers=0)
+        result = await processor.wait_for(doc.id, timeout=1.0)
+
+        assert result is not None
+        assert result.status == ProcessingStatus.FAILED
+        assert result.error == "boom"
+
+    @pytest.mark.asyncio
+    async def test_returns_cancelled(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        store.update(doc.id, extraction_status=ExtractionStatus.CANCELLED)
+
+        processor = DocumentProcessor(store, max_workers=0)
+        result = await processor.wait_for(doc.id, timeout=1.0)
+
+        assert result is not None
+        assert result.status == ProcessingStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_queued_document_still_waits_and_times_out(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        """A queued (non-terminal) document is not short-circuited; with no
+        worker running it still waits and times out."""
+        doc = store.register(sample_file, compute_file_hash(sample_file))  # QUEUED
+
+        processor = DocumentProcessor(store, max_workers=0)
+        result = await processor.wait_for(doc.id, timeout=0.3)
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_in_progress_document_is_not_short_circuited(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        """A worker sets EXTRACTED before it finishes auto-indexing, so an
+        in-progress document must stay on the event path and not resolve early
+        from the DB."""
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        store.update(doc.id, extraction_status=ExtractionStatus.EXTRACTED)
+
+        processor = DocumentProcessor(store, max_workers=0)
+        processor.in_progress[doc.id] = ProcessingTask(
+            document_id=doc.id, path=sample_file
+        )
+
+        # No worker will signal (max_workers=0), so it must wait and time out
+        # rather than reporting the in-progress EXTRACTED row as completed.
+        result = await processor.wait_for(doc.id, timeout=0.3)
+        assert result is None
+
+
 class TestProcessingResult:
     """Tests for ProcessingResult."""
 
