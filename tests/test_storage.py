@@ -449,6 +449,64 @@ class TestBatchPathUpdates:
         assert store.read(doc_b.id).path == str(temp_dir / "Docs" / "b.txt")
 
 
+class TestQueryByPathPrefix:
+    """Directory queries must stop at the path boundary and treat LIKE
+    wildcards / case literally, like the batch update functions."""
+
+    def _register_at(self, store: DocumentStore, temp_dir: Path, rel: str) -> Document:
+        file_path = temp_dir / rel
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(f"unique content for {rel}")
+        return store.register(file_path)
+
+    def test_returns_only_children_under_dir(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        self._register_at(store, temp_dir, "docs/a.txt")
+        self._register_at(store, temp_dir, "docs/sub/b.txt")
+        self._register_at(store, temp_dir, "docs2/c.txt")
+
+        results = store.query_by_path_prefix(str(temp_dir / "docs") + "/")
+
+        paths = {r.path for r in results}
+        assert paths == {
+            str(temp_dir / "docs" / "a.txt"),
+            str(temp_dir / "docs" / "sub" / "b.txt"),
+        }
+
+    def test_excludes_underscore_sibling(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        """SQLite LIKE treats "_" as a single-char wildcard; the match must not."""
+        doc_a = self._register_at(store, temp_dir, "my_docs/a.txt")
+        self._register_at(store, temp_dir, "myXdocs/b.txt")
+
+        results = store.query_by_path_prefix(str(temp_dir / "my_docs") + "/")
+
+        assert [r.id for r in results] == [doc_a.id]
+
+    def test_excludes_case_only_sibling(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        """SQLite LIKE is ASCII case-insensitive; the prefix match must not be."""
+        doc_a = self._register_at(store, temp_dir, "docs/a.txt")
+        self._register_at(store, temp_dir, "Docs/b.txt")
+
+        results = store.query_by_path_prefix(str(temp_dir / "docs") + "/")
+
+        assert [r.id for r in results] == [doc_a.id]
+
+    def test_prefix_without_trailing_slash_is_anchored(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        doc_a = self._register_at(store, temp_dir, "my_docs/a.txt")
+        self._register_at(store, temp_dir, "myXdocs/b.txt")
+
+        results = store.query_by_path_prefix(str(temp_dir / "my_docs"))
+
+        assert [r.id for r in results] == [doc_a.id]
+
+
 class TestExtractionErrorSentinel:
     """extraction_error=None clears the stored error; UNSET leaves it."""
 
