@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.19] - 2026-06-19
+
+### Fixed
+
+- **`query_by_path_prefix` now matches the directory boundary exactly, so directory operations no longer over-match sibling directories.** The query used a bare SQL `LIKE` pattern, but SQLite `LIKE` treats `_` and `%` as wildcards and is case-insensitive for ASCII, so a query for a directory like `my_docs/` also matched documents under siblings such as `myXdocs/` (the `_` matched `X`) or `My_Docs/` (case). That drove three directory tools wrong on common directory names: `delete_directory` reported "contains N registered documents" and refused to delete an empty directory whose name collided with a populated sibling, and `rename_directory`/`move_directory` gathered unrelated documents to wait on (up to a 120s timeout). The query now uses the same anchored, case-sensitive `SUBSTR` boundary match already used by `update_paths_batch` and `update_document_roots_batch`, so it returns only documents strictly under the requested directory. The path rewrite itself was already anchored, so no stored paths were affected.
+
 ## [1.1.18] - 2026-06-15
 
 ### Fixed

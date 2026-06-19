@@ -831,23 +831,32 @@ class DocumentStore(ThreadSafeSQLiteStore):
 
     def query_by_path_prefix(self, path_prefix: str, limit: int = 10000) -> list[DocumentSummary]:
         """
-        Query documents whose paths start with prefix (for directory ops).
+        Query documents strictly under a directory (for directory ops).
+
+        Only documents under the directory (path_prefix + "/") are returned.
+        The match is an exact, case-sensitive prefix comparison anchored at
+        the path-separator boundary - LIKE is unsuitable here because "%"/"_"
+        are wildcards AND SQLite LIKE is case-insensitive for ASCII, any of
+        which lets a query for "/data/my_docs/" wrongly return documents under
+        siblings like "/data/myXdocs/" (the "_" matched "X") or "/data/My_Docs/"
+        (case). This mirrors update_paths_batch / update_document_roots_batch.
 
         Args:
-            path_prefix: Path prefix to match
+            path_prefix: Directory path (with or without trailing "/")
             limit: Maximum results
 
         Returns:
             List of DocumentSummary objects
         """
         conn = self._get_conn()
+        old_dir = path_prefix.rstrip("/")
         cursor = conn.execute(
             """
             SELECT id, path, content_hash, filename, doc_type, title,
                    size_bytes, status, extraction_status, indexed_at
-            FROM documents WHERE path LIKE ? ORDER BY path LIMIT ?
+            FROM documents WHERE SUBSTR(path, 1, ?) = ? ORDER BY path LIMIT ?
             """,
-            (f"{path_prefix}%", limit),
+            (len(old_dir) + 1, old_dir + "/", limit),
         )
 
         summaries = []
