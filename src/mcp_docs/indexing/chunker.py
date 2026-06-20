@@ -70,6 +70,12 @@ class DocumentChunker:
         Returns:
             ChunkingResult with chunks and strategy used
         """
+        # Empty or whitespace-only text yields no chunks, so an empty
+        # extraction is never embedded as an empty string or stored as a
+        # meaningless chunk point.
+        if not text.strip():
+            return ChunkingResult(chunks=[], strategy="single")
+
         # Single chunk if small enough
         if len(text) <= self.max_chars:
             chunk = DocumentChunk(

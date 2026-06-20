@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.27] - 2026-06-20
+
+### Fixed
+
+- **A document whose extracted text is empty no longer sends an empty string to the embedding service or stores an empty-content chunk point.** When extraction produced empty text (for example an all-blank CSV, a no-cell notebook, or any non-PDF extractor that returned an empty string), the chunker emitted a single chunk with empty content. The indexer then built its embedding batch as `[summary, ""]` and posted the empty string to the embeddings endpoint, and stored a meaningless empty-content chunk point. The chunker now returns no chunks for empty or whitespace-only text, and the indexer drops empty or whitespace-only chunks before embedding, so such a document is indexed with only its summary point (which keeps it searchable by filename and metadata) and never embeds an empty string.
+
 ## [1.1.26] - 2026-06-20
 
 ### Fixed
