@@ -96,6 +96,47 @@ class TestDocumentScanner:
         assert result.files_new == 2
 
     @pytest.mark.asyncio
+    async def test_scan_root_honors_root_recursive_over_instance_flag(
+        self, store: DocumentStore, document_root: Path
+    ) -> None:
+        """A recursive=False root is scanned non-recursively even when the
+        scanner instance defaults to recursive=True.
+
+        The production scanner is a process-wide singleton built with the
+        default recursive=True, so the per-root flag must win at scan time.
+        """
+        # Mirror the production singleton: default recursive=True instance.
+        scanner = DocumentScanner(store)
+        assert scanner.recursive is True
+
+        # Root explicitly opts out of recursion.
+        root = store.add_root(str(document_root), recursive=False)
+
+        result = await scanner.scan_root(root)
+
+        # Only top-level supported files; subdir/file3.txt must be excluded.
+        assert result.files_found == 2  # file1.txt, file2.md only
+        assert result.files_new == 2
+
+    @pytest.mark.asyncio
+    async def test_scan_root_instance_recursive_false_overrides_recursive_root(
+        self, store: DocumentStore, document_root: Path
+    ) -> None:
+        """A scanner built with recursive=False stays non-recursive even for a
+        root whose recursive flag is the default True.
+
+        Either non-recursive setting prevents descent, so the instance-level
+        override is preserved for direct callers of DocumentScanner.
+        """
+        scanner = DocumentScanner(store, recursive=False)
+        root = store.add_root(str(document_root), recursive=True)
+
+        result = await scanner.scan_root(root)
+
+        assert result.files_found == 2  # file1.txt, file2.md only
+        assert result.files_new == 2
+
+    @pytest.mark.asyncio
     async def test_scan_root_detects_modifications(
         self, store: DocumentStore, document_root: Path
     ) -> None:

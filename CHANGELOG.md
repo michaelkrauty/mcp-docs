@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.22] - 2026-06-20
+
+### Fixed
+
+- **`scan_root` now honors a document root's `recursive=False` setting instead of always walking subdirectories.** A root's `recursive` flag was accepted by `add_document_root`, persisted, and read back into the `DocumentRoot` model, but the scan never consulted it. The descend decision in the file walk checked the scanner instance attribute `self.recursive`, which is set once at construction, and the production scanner is a process-wide singleton built with the default `recursive=True`. As a result every root, including ones added with `recursive=False`, was scanned recursively, and subdirectory files were registered, queued, extracted, and indexed against the user's intent. The walk now descends only when both the scanner instance and the root permit recursion, so a root added with `recursive=False` is no longer walked recursively by the production scanner, while a scanner explicitly constructed with `recursive=False` still scans non-recursively as before.
+
 ## [1.1.21] - 2026-06-19
 
 ### Fixed
