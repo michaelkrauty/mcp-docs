@@ -1,6 +1,6 @@
 """MCP Docs - Document management with vector search."""
 
-__version__ = "1.1.27"
+__version__ = "1.1.28"
 
 
 def main() -> None:
