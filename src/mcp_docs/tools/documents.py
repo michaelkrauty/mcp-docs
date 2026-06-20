@@ -67,6 +67,7 @@ async def register_document(
     existing = store.get_by_hash(content_hash)
     was_registered = existing is not None
     old_path = existing.path if existing else None
+    old_filename = existing.filename if existing else None
 
     # Register document (atomically handles duplicates)
     document = store.register(
@@ -77,17 +78,19 @@ async def register_document(
 
     # Return with already_registered flag if it was pre-existing
     if was_registered:
-        # register() moves the registry path when the same content is
-        # re-registered at a new location, but the Qdrant payloads still carry
-        # the old path. Sync the index (as move_file does) so search does not
-        # return a path that no longer exists while get_document returns the new
-        # one.
+        # register() moves the registry path (and filename) when the same
+        # content is re-registered at a new location, but the Qdrant payloads
+        # still carry the old values. Sync the index (as move_file does) so
+        # search does not return a path/filename that no longer exists while
+        # get_document returns the new one.
         if old_path is not None and document.path != old_path:
             try:
                 indexer = await get_document_indexer()
                 await indexer.update_document_path_in_index(
                     document.id, document.path
                 )
+                if old_filename != document.filename:
+                    await indexer.update_document_filename_in_index(document)
             except Exception as e:
                 logger.warning(f"Failed to sync index path for {document.id}: {e}")
         return {

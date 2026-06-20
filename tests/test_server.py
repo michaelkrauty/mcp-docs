@@ -274,6 +274,48 @@ class TestRegisterDocument:
             call = indexer.update_document_path_in_index.await_args
             assert call.args[0] == doc.id
             assert call.args[1] == str(b)
+            # Different basename (a.txt -> b.txt): the filename payload is synced
+            # too, and the registry filename tracks the new basename.
+            indexer.update_document_filename_in_index.assert_awaited_once()
+            assert store.read(doc.id).filename == "b.txt"
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_register_moved_same_basename_syncs_path_only(
+        self, temp_dir: Path
+    ) -> None:
+        """A relocation that keeps the basename syncs the path payload but not
+        the filename payload."""
+        import mcp_docs.tools.documents as documents_mod
+        from mcp_docs.storage.database import DocumentStore, compute_file_hash
+
+        store = DocumentStore(db_path=temp_dir / "t.db")
+        try:
+            d1 = temp_dir / "d1"
+            d1.mkdir()
+            a = d1 / "a.txt"
+            a.write_text("content")
+            d2 = temp_dir / "d2"
+            d2.mkdir()
+            b = d2 / "a.txt"
+            b.write_text("content")  # same content, same basename, new dir
+            store.register(path=a, content_hash=compute_file_hash(a))
+
+            indexer = AsyncMock()
+
+            async def fake_get_indexer():
+                return indexer
+
+            with patch.object(
+                documents_mod, "get_document_store", return_value=store
+            ), patch.object(
+                documents_mod, "get_document_indexer", fake_get_indexer
+            ):
+                await documents_mod.register_document(path=str(b))
+
+            indexer.update_document_path_in_index.assert_awaited_once()
+            indexer.update_document_filename_in_index.assert_not_awaited()
         finally:
             store.close()
 
