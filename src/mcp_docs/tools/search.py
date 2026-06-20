@@ -8,6 +8,8 @@ Tools:
 """
 
 
+import logging
+
 from qdrant_client.models import FieldCondition, Filter, MatchText, MatchValue
 from vector_core import parse_uuid_or_none, validate_limit
 from vector_core.errors import ErrorCode, error_response
@@ -17,6 +19,8 @@ from mcp_docs.models import DocumentNotFoundError
 from mcp_docs.settings import settings
 from mcp_docs.singletons import get_search_engine
 from mcp_docs.tools._validation import validate_doc_type
+
+logger = logging.getLogger(__name__)
 
 
 @mcp.tool()
@@ -129,39 +133,73 @@ async def keyword_search(
     if must_conditions:
         filter_dict["must"] = must_conditions
 
-    # Scroll through matching points
-    scroll_result = await client.scroll(
-        settings.collection_name,
-        scroll_filter=Filter(**filter_dict),
-        limit=limit * 2,  # Fetch more to account for duplicates
-        with_payload=True,
-    )
-
-    points, _ = scroll_result
+    # Scroll through matching points, paginating until we have `limit` distinct
+    # documents or the matches are exhausted. keyword_search matches points (one
+    # summary point plus one per chunk per document), so a single over-fetched
+    # page can be filled by a few content-heavy documents whose chunks all match,
+    # leaving other matching documents undiscovered. Following the scroll offset
+    # avoids silently dropping them; the total points scanned is bounded to
+    # protect memory and latency.
+    scroll_filter = Filter(**filter_dict)
+    page_size = min(max(limit * 2, 64), 512)
+    max_scan = max(limit * 20, 2000)
+    # Return only the metadata fields the result uses. Fetching every scanned
+    # chunk point's full `content` body while paginating would transfer large
+    # text the result never reads, which is costly on the content-heavy matches
+    # this pagination exists to handle. The filter still matches on content
+    # server-side; this only limits what is returned.
+    payload_fields = ["document_id", "filename", "path", "doc_type", "title", "tags"]
 
     # Deduplicate by document_id and build results
     seen_docs: set[str] = set()
-    results = []
+    results: list[dict] = []
+    offset = None
+    scanned = 0
 
-    for point in points:
-        payload = point.payload or {}
-        doc_id = payload.get("document_id", "")
-
-        if doc_id in seen_docs:
-            continue
-        seen_docs.add(doc_id)
-
-        results.append({
-            "document_id": doc_id,
-            "filename": payload.get("filename", ""),
-            "path": payload.get("path", ""),
-            "doc_type": payload.get("doc_type", ""),
-            "title": payload.get("title"),
-            "tags": payload.get("tags", []),
-        })
-
-        if len(results) >= limit:
+    while len(results) < limit and scanned < max_scan:
+        points, offset = await client.scroll(
+            settings.collection_name,
+            scroll_filter=scroll_filter,
+            limit=min(page_size, max_scan - scanned),
+            offset=offset,
+            with_payload=payload_fields,
+        )
+        if not points:
             break
+        scanned += len(points)
+
+        for point in points:
+            payload = point.payload or {}
+            doc_id = payload.get("document_id", "")
+
+            if doc_id in seen_docs:
+                continue
+            seen_docs.add(doc_id)
+
+            results.append({
+                "document_id": doc_id,
+                "filename": payload.get("filename", ""),
+                "path": payload.get("path", ""),
+                "doc_type": payload.get("doc_type", ""),
+                "title": payload.get("title"),
+                "tags": payload.get("tags", []),
+            })
+
+            if len(results) >= limit:
+                break
+
+        if offset is None:
+            break
+
+    if len(results) < limit and scanned >= max_scan:
+        logger.debug(
+            "keyword_search hit the %d-point scan cap with %d/%d documents for "
+            "keyword %r; more matches may exist",
+            max_scan,
+            len(results),
+            limit,
+            keyword,
+        )
 
     return results
 

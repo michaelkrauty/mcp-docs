@@ -378,3 +378,74 @@ class TestFindSimilarDocumentsTool:
             result = await find_similar_documents(str(uuid4()))
         assert isinstance(result, list)
         assert result[0]["filename"] == "n.txt"
+
+
+class TestKeywordSearchPagination:
+    """keyword_search matches points (one summary point plus one per chunk per
+    document), so a single over-fetched scroll page can be filled by a few
+    content-heavy documents before `limit` DISTINCT documents are collected. It
+    must paginate through the scroll offset, not silently drop matching docs."""
+
+    @staticmethod
+    def _pt(doc: str):
+        from unittest.mock import MagicMock
+
+        m = MagicMock()
+        m.payload = {
+            "document_id": doc,
+            "filename": f"{doc}.txt",
+            "path": f"/{doc}.txt",
+            "doc_type": "txt",
+            "title": None,
+            "tags": [],
+        }
+        return m
+
+    @pytest.mark.asyncio
+    async def test_paginates_past_content_heavy_documents(self) -> None:
+        from mcp_docs.tools.search import keyword_search
+
+        # Page 1 (the over-fetch) is consumed by two content-heavy docs whose
+        # chunks all match; the distinct docs C, D, E only appear on page 2.
+        page1 = [self._pt(d) for d in ["A", "A", "B", "A", "B", "A"]]
+        page2 = [self._pt(d) for d in ["C", "D", "E"]]
+
+        mock_client = AsyncMock()
+        mock_client.scroll.side_effect = [(page1, "offset1"), (page2, None)]
+        engine = AsyncMock()
+        engine.storage.get_client.return_value = mock_client
+
+        with patch(
+            "mcp_docs.tools.search.get_search_engine",
+            new=AsyncMock(return_value=engine),
+        ):
+            result = await keyword_search(keyword="invoice", limit=3)
+
+        assert isinstance(result, list)
+        # Must collect 3 distinct docs across both pages, not stop at [A, B].
+        assert [r["document_id"] for r in result] == ["A", "B", "C"]
+        # Only metadata fields are fetched, never the large chunk `content`.
+        with_payload = mock_client.scroll.await_args_list[0].kwargs["with_payload"]
+        assert isinstance(with_payload, list)
+        assert "content" not in with_payload
+        assert "document_id" in with_payload
+
+    @pytest.mark.asyncio
+    async def test_stops_at_limit_without_extra_scroll(self) -> None:
+        from mcp_docs.tools.search import keyword_search
+
+        page1 = [self._pt(d) for d in ["A", "B", "C", "D"]]
+        mock_client = AsyncMock()
+        mock_client.scroll.side_effect = [(page1, "offset1"), ([], None)]
+        engine = AsyncMock()
+        engine.storage.get_client.return_value = mock_client
+
+        with patch(
+            "mcp_docs.tools.search.get_search_engine",
+            new=AsyncMock(return_value=engine),
+        ):
+            result = await keyword_search(keyword="x", limit=2)
+
+        assert [r["document_id"] for r in result] == ["A", "B"]
+        # The first page already yielded `limit` distinct docs: no second scroll.
+        assert mock_client.scroll.await_count == 1

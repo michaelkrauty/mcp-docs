@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.31] - 2026-06-20
+
+### Fixed
+
+- **`keyword_search` no longer silently drops matching documents when the matches are concentrated in content-heavy files.** Keyword search matches points (each document is indexed as a summary point plus one point per chunk, all carrying the content), then deduplicates by document. It fetched a single over-sized scroll page (twice the requested limit) and discarded the continuation cursor, so when a few long documents contributed many matching chunk points, that page was exhausted before the requested number of distinct documents had been collected, and the remaining matching documents were never returned. For example, a search limited to 100 documents over 150 matching documents that each contribute two or more matching points returned only about 66. The tool now paginates through the scroll cursor, accumulating distinct documents until the limit is reached or the matches are exhausted, with a bound on the total points scanned to protect memory and latency.
+
 ## [1.1.30] - 2026-06-20
 
 ### Fixed
