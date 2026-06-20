@@ -155,25 +155,22 @@ Third paragraph providing additional content for verification purposes."""
         assert chunk.char_end == len(text)
 
     def test_empty_document_handling(self) -> None:
-        """Empty documents produce a single chunk."""
+        """Empty documents produce no chunks (nothing to embed or index)."""
         chunker = DocumentChunker()
         doc_id = uuid4()
 
         result = chunker.chunk(doc_id, "")
 
-        assert result.strategy == "single"
-        assert len(result.chunks) == 1
-        assert result.chunks[0].content == ""
+        assert result.chunks == []
 
     def test_whitespace_only_document(self) -> None:
-        """Whitespace-only documents are handled."""
+        """Whitespace-only documents produce no chunks."""
         chunker = DocumentChunker()
         doc_id = uuid4()
 
         result = chunker.chunk(doc_id, "   \n\n   \t   ")
 
-        assert result.strategy == "single"
-        assert len(result.chunks) == 1
+        assert result.chunks == []
 
 
 class TestVocabularyTraining:

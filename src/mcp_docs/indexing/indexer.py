@@ -300,6 +300,11 @@ class DocumentIndexer:
         # Chunk the document
         chunks = chunk_document(document.id, content, document.page_count)
 
+        # Drop empty or whitespace-only chunks so an empty extraction is not
+        # embedded as an empty string or stored as a meaningless chunk point;
+        # the summary point below still keeps the document searchable.
+        chunks = [chunk for chunk in chunks if chunk.content.strip()]
+
         # Prepare texts for batch embedding
         texts = [chunk.content for chunk in chunks]
 

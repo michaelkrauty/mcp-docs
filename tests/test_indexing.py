@@ -23,6 +23,13 @@ class TestDocumentChunker:
         assert result.chunks[0].content == text
         assert result.chunks[0].chunk_index == 0
 
+    def test_empty_text_produces_no_chunks(self) -> None:
+        """Empty or whitespace-only text yields no chunks, so no empty-content
+        chunk is created or sent to the embedder."""
+        chunker = DocumentChunker()
+        assert chunker.chunk(uuid4(), "").chunks == []
+        assert chunker.chunk(uuid4(), "   \n\t  ").chunks == []
+
     def test_chunk_by_sections(self) -> None:
         """Documents with H1 headers split at sections."""
         chunker = DocumentChunker(max_chars=100)  # Force split
@@ -400,3 +407,49 @@ class TestIndexAllCompleteCorpus:
         mock_store.query.assert_not_called()
         # One "file not found" error per enumerated document: all 60, not 50.
         assert len(result["errors"]) == n
+
+
+class TestDocumentIndexerEmptyContent:
+    """A document whose extracted text is empty must not embed an empty string
+    or store an empty-content chunk point; only the filename-based summary
+    point is indexed."""
+
+    @pytest.mark.asyncio
+    async def test_empty_content_indexes_summary_only(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from mcp_docs.indexing.indexer import DocumentIndexer
+        from mcp_docs.storage.database import DocumentStore
+
+        store = DocumentStore(db_path=tmp_path / "empty.db")
+        try:
+            f = tmp_path / "blank.txt"
+            f.write_text("")
+            doc = store.register(f)
+
+            fake_storage = MagicMock()
+            fake_embedder = MagicMock()
+            fake_embedder.embed_batch = AsyncMock(
+                side_effect=lambda texts: [[0.1, 0.2, 0.3] for _ in texts]
+            )
+            indexer = DocumentIndexer(
+                document_store=store,
+                storage=fake_storage,
+                embedder=fake_embedder,
+                global_vocab=MagicMock(),
+                collection_name="test",
+            )
+            monkeypatch.setattr(
+                indexer, "_create_point", MagicMock(return_value="POINT")
+            )
+
+            points = await indexer._create_document_points(doc, content="")
+
+            fake_embedder.embed_batch.assert_awaited_once()
+            texts = fake_embedder.embed_batch.await_args.args[0]
+            assert all(t.strip() for t in texts), texts  # no empty string embedded
+            assert len(points) == 1  # summary point only, no empty chunk point
+        finally:
+            store.close()
