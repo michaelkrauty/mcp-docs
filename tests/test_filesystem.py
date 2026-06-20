@@ -76,6 +76,7 @@ def mock_indexer():
     with patch("mcp_docs.tools.filesystem.get_document_indexer") as mock:
         indexer = AsyncMock()
         indexer.update_document_path_in_index = AsyncMock()
+        indexer.update_document_filename_in_index = AsyncMock()
         indexer.update_paths_batch_in_index = AsyncMock(return_value=5)
         mock.return_value = indexer
         yield indexer
@@ -221,11 +222,71 @@ class TestMoveFile:
         dest_path = str(doc_root / "moved_sample.txt")
         
         await move_file(source_path, dest_path)
-        
+
         # Verify index update called
         mock_indexer.update_document_path_in_index.assert_called_once_with(
             registered_doc.id, dest_path
         )
+
+    @pytest.mark.asyncio
+    async def test_move_file_rename_updates_filename(
+        self,
+        mock_store: DocumentStore,
+        mock_processor: AsyncMock,
+        mock_indexer: AsyncMock,
+        registered_doc,
+        doc_root: Path,
+    ):
+        """A rename-move updates the stored basename, not only the path."""
+        source_path = str(registered_doc.path)
+        dest_path = str(doc_root / "renamed.txt")
+
+        result = await move_file(source_path, dest_path)
+
+        assert result["success"] is True
+        updated_doc = mock_store.read(registered_doc.id)
+        assert updated_doc.filename == "renamed.txt"
+
+    @pytest.mark.asyncio
+    async def test_move_file_rename_resyncs_filename_in_index(
+        self,
+        mock_store: DocumentStore,
+        mock_processor: AsyncMock,
+        mock_indexer: AsyncMock,
+        registered_doc,
+        doc_root: Path,
+    ):
+        """A basename change resyncs the filename payload/summary in the index."""
+        source_path = str(registered_doc.path)
+        dest_path = str(doc_root / "renamed.txt")
+
+        await move_file(source_path, dest_path)
+
+        mock_indexer.update_document_filename_in_index.assert_called_once()
+        passed_doc = mock_indexer.update_document_filename_in_index.call_args.args[0]
+        assert passed_doc.filename == "renamed.txt"
+
+    @pytest.mark.asyncio
+    async def test_move_file_same_name_skips_filename_resync(
+        self,
+        mock_store: DocumentStore,
+        mock_processor: AsyncMock,
+        mock_indexer: AsyncMock,
+        registered_doc,
+        temp_dir: Path,
+    ):
+        """A pure relocation (same basename) leaves the filename untouched."""
+        root2 = temp_dir / "documents2"
+        root2.mkdir()
+        mock_store.add_root(str(root2), name="Test Root 2")
+        source_path = str(registered_doc.path)
+        dest_path = str(root2 / "sample.txt")  # same basename, different directory
+
+        await move_file(source_path, dest_path)
+
+        mock_indexer.update_document_filename_in_index.assert_not_called()
+        updated_doc = mock_store.read(registered_doc.id)
+        assert updated_doc.filename == "sample.txt"
 
     @pytest.mark.asyncio
     async def test_move_file_processing_timeout(

@@ -145,11 +145,23 @@ async def move_file(source_path: str, destination_path: str) -> dict:
         except OSError as e:
             return error_response(ErrorCode.INVALID_INPUT, f"Failed to move file: {e}")
 
-        # 7. Update document path and document_root
-        store.update(document.id, path=str(dest), document_root=dest_root)
+        # 7. Update document path, document_root, and (on a rename) the basename.
+        #    move_file permits the destination to have a different basename than
+        #    the source, so the stored filename must track it or it goes stale.
+        renamed = dest.name != source.name
+        updated = store.update(
+            document.id,
+            path=str(dest),
+            document_root=dest_root,
+            filename=dest.name if renamed else None,
+        )
 
-        # 8. Update vector index path
+        # 8. Update the vector index: the path payload always, and the filename
+        #    only when the basename changed (filename lives in every point's
+        #    payload and is embedded in the document summary text).
         await indexer.update_document_path_in_index(document.id, str(dest))
+        if renamed:
+            await indexer.update_document_filename_in_index(updated)
 
         logger.info(f"Moved file {source} -> {dest}")
 

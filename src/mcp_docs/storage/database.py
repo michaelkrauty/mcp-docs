@@ -283,6 +283,7 @@ class DocumentStore(ThreadSafeSQLiteStore):
         extraction_error: str | None | UnsetType = UNSET,
         status: DocumentStatus | None = None,
         path: str | None = None,
+        filename: str | None = None,
         content_hash: str | None = None,
         document_root: str | None = None,
     ) -> Document:
@@ -300,6 +301,7 @@ class DocumentStore(ThreadSafeSQLiteStore):
                 re-extraction; leave UNSET to keep the current value)
             status: New document status
             path: New path (for relocations)
+            filename: New basename (when a relocation also renames the file)
             content_hash: New content hash (when file modified)
             document_root: New document root
 
@@ -344,6 +346,10 @@ class DocumentStore(ThreadSafeSQLiteStore):
         if path is not None:
             updates.append("path = ?")
             params.append(path)
+
+        if filename is not None:
+            updates.append("filename = ?")
+            params.append(filename)
 
         if content_hash is not None:
             # Check for hash collision before updating — another document
