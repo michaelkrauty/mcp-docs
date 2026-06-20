@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.30] - 2026-06-20
+
+### Fixed
+
+- **Concurrent `wait_for` calls on the same document no longer let one waiter's timeout orphan the others.** Concurrent waiters share a single event per document (by design). A waiter that timed out unconditionally removed that shared entry, so when the document later finished, the worker's completion signal found no entry and never set the event; any other waiter still blocked on it slept until its own (often much longer) timeout and then returned `None`, a spurious timeout for a document that had actually completed (for `move_file` and the directory move/rename tools, that surfaced as a false `TIMEOUT` error). Waiters are now reference-counted, so the shared event is removed only when the last waiter leaves, and the timeout path re-checks the completed cache before giving up so a late waiter recovers a result that finished during its wait. The worker now only signals completion and lets the last waiter clean up the event.
+
 ## [1.1.29] - 2026-06-20
 
 ### Fixed

@@ -1,6 +1,9 @@
 """Tests for document processing queue."""
 
+import asyncio
 import tempfile
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -535,3 +538,68 @@ class TestProcessingResult:
         assert d["status"] == "completed"
         assert d["title"] == "Test"
         assert d["word_count"] == 100
+
+
+class TestConcurrentWaitFor:
+    """wait_for supports concurrent waiters on the same document (they share one
+    event). One waiter's timeout must not orphan the others, and a timed-out
+    waiter must still recover a result that completed during the wait."""
+
+    @staticmethod
+    def _result(doc_id):
+        now = datetime.now(UTC)
+        return ProcessingResult(
+            document_id=doc_id,
+            status=ProcessingStatus.COMPLETED,
+            started_at=now,
+            completed_at=now,
+        )
+
+    @pytest.mark.asyncio
+    async def test_timeout_recovers_result_completed_during_wait(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        proc = DocumentProcessor(store, max_workers=0)
+        proc.in_progress[doc.id] = ProcessingTask(document_id=doc.id, path=sample_file)
+        result = self._result(doc.id)
+
+        async def populate():
+            await asyncio.sleep(0.05)
+            # Result cached but the event is NOT set (e.g. orphaned by a peer).
+            proc.completed[doc.id] = result
+
+        asyncio.create_task(populate())
+        got = await proc.wait_for(doc.id, timeout=0.3)
+        assert got is result
+
+    @pytest.mark.asyncio
+    async def test_short_waiter_timeout_does_not_orphan_long_waiter(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        proc = DocumentProcessor(store, max_workers=0)
+        proc.in_progress[doc.id] = ProcessingTask(document_id=doc.id, path=sample_file)
+        result = self._result(doc.id)
+
+        async def short():
+            return await proc.wait_for(doc.id, timeout=0.1)
+
+        async def long():
+            return await proc.wait_for(doc.id, timeout=2.0)
+
+        async def complete():
+            await asyncio.sleep(0.3)  # after the short waiter has timed out
+            proc.completed[doc.id] = result
+            # Mirror the worker's completion signal.
+            if doc.id in proc.waiting:
+                event, _ = proc.waiting[doc.id]
+                event.set()
+
+        t0 = time.monotonic()
+        a, b, _ = await asyncio.gather(short(), long(), complete())
+        elapsed = time.monotonic() - t0
+
+        assert a is None  # short waiter timed out
+        assert b is result  # long waiter was not orphaned and recovered the result
+        assert elapsed < 1.5  # long waiter woke on the signal, not after its 2.0s timeout
