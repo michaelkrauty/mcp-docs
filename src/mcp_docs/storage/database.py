@@ -625,11 +625,21 @@ class DocumentStore(ThreadSafeSQLiteStore):
         return [row[0] for row in cursor.fetchall()]
 
     def _update_path(self, document_id: UUID, new_path: str) -> None:
-        """Update document path (for relocations)."""
+        """Update document path and filename (for relocations).
+
+        The filename always follows the path's basename, so they are updated
+        together to keep the registry consistent when the same content is
+        re-registered at a renamed location.
+        """
         conn = self._get_conn()
         conn.execute(
-            "UPDATE documents SET path = ?, indexed_at = ? WHERE id = ?",
-            (new_path, datetime.now(UTC).isoformat(), str(document_id)),
+            "UPDATE documents SET path = ?, filename = ?, indexed_at = ? WHERE id = ?",
+            (
+                new_path,
+                Path(new_path).name,
+                datetime.now(UTC).isoformat(),
+                str(document_id),
+            ),
         )
         conn.commit()
 

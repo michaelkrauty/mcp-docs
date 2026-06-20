@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.33] - 2026-06-20
+
+### Fixed
+
+- **Re-registering an already-indexed document at a new path now syncs that path into the search index.** When the same content (same hash) is registered again under a different path, `register_document` updates the registry path but previously returned without touching the vector index, so the Qdrant payloads kept the old path. Search results then reported the old, now nonexistent path while `get_document` and `list_documents` reported the new one, and nothing reconciled the two (the document-id-keyed point operations never rewrite the path payload, and manually registered documents are not covered by the scanner's relocation reconciliation). `register_document` now updates the path in the index on the already-registered branch when the path changed, mirroring `move_file`.
+
 ## [1.1.32] - 2026-06-20
 
 ### Changed
