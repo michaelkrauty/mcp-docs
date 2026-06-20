@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.24] - 2026-06-20
+
+### Fixed
+
+- **`move_file` now keeps a renamed document's stored filename in sync, in both the registry and the search index.** `move_file` lets the destination have a different basename than the source (a move and a rename in one call), but it only updated the document's `path`, never its `filename`. The `filename` is a separately stored field, set once at registration from the original basename and not derived from the path, so after a rename-move the registry and every indexed point kept the old basename. As a result `get_document`, `list_documents`, and search results reported the previous name, and `keyword_search` with `search_filename=True` matched the old name and missed the file's real on-disk name; a later full reindex re-baked the stale name, making the drift stick. `DocumentStore.update` now accepts a `filename` argument, `move_file` passes the new basename when the name changes, and a new `update_document_filename_in_index` refreshes the `filename` payload on every point and regenerates the document summary point (which embeds the filename in its searchable text). A pure relocation that keeps the same basename is unaffected.
+
 ## [1.1.23] - 2026-06-20
 
 ### Fixed

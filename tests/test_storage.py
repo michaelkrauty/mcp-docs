@@ -172,6 +172,16 @@ class TestDocumentStoreUpdate:
         assert updated.page_count == 5
         assert updated.word_count == 100
 
+    def test_update_filename(self, store: DocumentStore, sample_file: Path) -> None:
+        """Can update the stored basename (for rename-moves)."""
+        content_hash = compute_file_hash(sample_file)
+        doc = store.register(sample_file, content_hash)
+        assert doc.filename == "sample.txt"
+
+        updated = store.update(doc.id, filename="renamed.txt")
+        assert updated.filename == "renamed.txt"
+        assert store.read(doc.id).filename == "renamed.txt"
+
 
 class TestDocumentStoreDelete:
     """Tests for document deletion."""
