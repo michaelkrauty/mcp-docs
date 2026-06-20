@@ -196,8 +196,13 @@ class DocumentScanner:
             ):
                 for filename in filenames:
                     yield Path(dirpath) / filename
-                if not self.recursive:
-                    # Only scan the top-level directory; do not descend.
+                if not self.recursive or not root.recursive:
+                    # Descend only when both the scanner instance and the root
+                    # permit recursion. Honoring root.recursive is what makes a
+                    # recursive=False root non-recursive under the production
+                    # scanner (a singleton built with recursive=True); keeping
+                    # self.recursive in the condition preserves the instance-level
+                    # override for direct callers of DocumentScanner.
                     dirnames[:] = []
 
         # Scan directory
