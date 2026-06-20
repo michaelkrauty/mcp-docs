@@ -547,16 +547,33 @@ class DocumentProcessor:
             error=doc.extraction_error if status == ProcessingStatus.FAILED else None,
         )
 
-    async def wait_for_documents(self, document_ids: list[UUID], timeout: float = 60.0) -> bool:
+    async def wait_for_documents(
+        self,
+        document_ids: list[UUID],
+        timeout: float = 60.0,
+        require_completed: bool = True,
+    ) -> bool:
         """
         Wait for multiple documents to finish processing. Returns True if all done.
 
         Args:
             document_ids: List of document UUIDs to wait for
             timeout: Maximum time to wait in seconds
+            require_completed: When True (default), a document counts as "done"
+                only if it reached COMPLETED; a terminal FAILED or CANCELLED
+                document counts as not done. When False, any terminal state
+                (COMPLETED, FAILED, or CANCELLED) counts as done. Callers that
+                only need processing to have FINISHED before touching the file
+                (the move/rename tools, which must not race the indexer but do
+                not care whether extraction succeeded) pass False, so a
+                permanently failed or cancelled document no longer blocks the
+                operation. A document still genuinely processing or queued
+                blocks either way until it reaches a terminal state or the
+                timeout elapses.
 
         Returns:
-            True if all documents are completed, False if timeout or any document failed
+            True if all documents are done (per require_completed), False if any
+            timed out, errored, or (when require_completed) did not complete.
         """
         if not document_ids:
             return True
@@ -570,7 +587,7 @@ class DocumentProcessor:
         try:
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Check if all documents completed successfully
+            # Check if all documents are done.
             all_completed = True
             for i, result in enumerate(results):
                 doc_id = document_ids[i]
@@ -581,7 +598,7 @@ class DocumentProcessor:
                 elif result is None:
                     logger.warning(f"Timeout waiting for document {doc_id}")
                     all_completed = False
-                elif result.status != ProcessingStatus.COMPLETED:
+                elif require_completed and result.status != ProcessingStatus.COMPLETED:
                     logger.warning(f"Document {doc_id} processing failed: {result.error}")
                     all_completed = False
 
