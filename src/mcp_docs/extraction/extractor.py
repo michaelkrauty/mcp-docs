@@ -145,21 +145,12 @@ class ContentExtractor:
             )
 
         try:
-            from mcp_docs.extraction.ocr import extract_scanned_pdf_sync
+            from mcp_docs.extraction.ocr import (
+                _all_pages_failed,
+                extract_scanned_pdf_sync,
+            )
 
             ocr_result = extract_scanned_pdf_sync(path)
-
-            # Only use OCR result if it actually got more content
-            if ocr_result.word_count > result.word_count:
-                logger.info(
-                    f"OCR extracted {ocr_result.word_count} words "
-                    f"(vs {result.word_count} from markitdown)"
-                )
-                return ocr_result
-
-            logger.info("OCR didn't improve extraction, using markitdown result")
-            return result
-
         except Exception as e:
             logger.warning(f"OCR fallback failed for {path.name}: {e}")
             if result.word_count > 0:
@@ -169,6 +160,35 @@ class ContentExtractor:
                 "The PDF may be scanned/image-based. Check that your vision endpoint "
                 f"({settings.ocr_vision_url}) is running and mcp-docs[ocr] is installed."
             ) from e
+
+        # Discard an OCR result whose every page failed. Each failed page is a
+        # "[OCR failed for page N]" placeholder, so the result's word_count is
+        # non-zero and would otherwise beat a thin markitdown result and be
+        # indexed as the document body. OCR ran without error here, so this is a
+        # deliberate rejection, not a fallback failure.
+        if _all_pages_failed(ocr_result):
+            logger.warning(
+                f"OCR failed for every page of {path.name}; discarding placeholder result"
+            )
+            if result.word_count > 0:
+                return result
+            raise ExtractionError(
+                f"No text could be extracted from {path.name}: markitdown found "
+                "no usable text and OCR failed for every page. The PDF may be "
+                "scanned/image-based; check that the vision endpoint "
+                f"({settings.ocr_vision_url}) is reachable and mcp-docs[ocr] is installed."
+            )
+
+        # Only use OCR result if it actually got more content
+        if ocr_result.word_count > result.word_count:
+            logger.info(
+                f"OCR extracted {ocr_result.word_count} words "
+                f"(vs {result.word_count} from markitdown)"
+            )
+            return ocr_result
+
+        logger.info("OCR didn't improve extraction, using markitdown result")
+        return result
 
     def can_extract(self, doc_type: DocumentType) -> bool:
         """

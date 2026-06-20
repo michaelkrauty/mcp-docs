@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.23] - 2026-06-20
+
+### Fixed
+
+- **A scanned PDF whose OCR fails on every page is no longer indexed with `[OCR failed for page N]` placeholder text.** When the vision OCR fallback ran and every page failed (endpoint outage, connection error, circuit breaker), `ocr_page` returned a `[OCR failed for page N]` placeholder per page, `_merge_pages` stitched these into the result text, and `word_count` counted the placeholder words. `_extract_pdf` then accepted the OCR result whenever its `word_count` exceeded the thin markitdown result, with no check of the `ocr_failed_pages` metadata it had recorded, so a document whose real text was empty or thin got indexed with a body made entirely of placeholders, and `_extract_with_cache` cached that result, poisoning future extractions until the file's mtime changed. `_extract_pdf` now discards an OCR result whose every page failed, returning the markitdown text if any was extracted and otherwise raising `ExtractionError` so the document is treated as unextractable rather than indexed as placeholders, and `_extract_with_cache` skips caching a fully-failed result. Detection keys off the recorded `ocr_failed_pages` metadata rather than the placeholder string, and partially-failed results (some pages succeeded) are unaffected. A fully-failed result already present in the cache (for example written before this fix) is now ignored on read and re-extracted, so OCR is retried rather than the stale placeholders being served indefinitely.
+
 ## [1.1.22] - 2026-06-20
 
 ### Fixed

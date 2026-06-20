@@ -267,6 +267,20 @@ async def extract_scanned_pdf(path: Path) -> ExtractedContent:
     )
 
 
+def _all_pages_failed(result: ExtractedContent) -> bool:
+    """Whether every page of an OCR result failed.
+
+    ``ocr_page`` emits a ``[OCR failed for page N]`` placeholder for each page
+    whose vision call errored, recording the page number in
+    ``metadata['ocr_failed_pages']``. When every page failed the result text is
+    nothing but placeholders, so it must not be accepted as document content or
+    written to the cache.
+    """
+    page_count = result.page_count or 0
+    failed = len(result.metadata.get("ocr_failed_pages", []))
+    return page_count > 0 and failed >= page_count
+
+
 async def _extract_with_cache(path: Path) -> ExtractedContent:
     """Extract scanned PDF with caching."""
     if not settings.ocr_cache_enabled:
@@ -274,11 +288,18 @@ async def _extract_with_cache(path: Path) -> ExtractedContent:
 
     cache_key = _get_cache_key(path)
     cached = _load_from_cache(cache_key)
-    if cached is not None:
+    # Ignore a cached fully-failed result (for example one written before this
+    # guard existed) so OCR is retried instead of serving placeholder text.
+    if cached is not None and not _all_pages_failed(cached):
         return cached
 
     result = await extract_scanned_pdf(path)
-    _save_to_cache(cache_key, result)
+    # Do not cache a fully-failed OCR result: its body is only
+    # "[OCR failed for page N]" placeholders, and the cache key is the file's
+    # path/size/mtime, so caching it would poison every future extraction of
+    # this file until its mtime changes.
+    if not _all_pages_failed(result):
+        _save_to_cache(cache_key, result)
     return result
 
 
