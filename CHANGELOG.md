@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.25] - 2026-06-20
+
+### Fixed
+
+- **`find_similar_documents` now returns an empty list for an indexed document that has no similar neighbors, instead of reporting it as not found.** The tool treated any empty result from the search engine as "Document not found in index", but `find_similar` returns an empty list in several distinct cases, including the normal one where the document is indexed but no other document is similar to it (for example a single-document collection, where the only candidate is the document itself and is excluded). Callers received a `NOT_FOUND` error for a document that is plainly present and searchable. `find_similar` now raises `DocumentNotFoundError` only when the source document is genuinely absent from the index, and the tool maps that to `NOT_FOUND` while passing a real empty result through as an empty list. A document that is indexed but has no comparable dense vector still returns an empty list rather than an error.
+
 ## [1.1.24] - 2026-06-20
 
 ### Fixed

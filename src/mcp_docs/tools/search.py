@@ -13,6 +13,7 @@ from vector_core import parse_uuid_or_none, validate_limit
 from vector_core.errors import ErrorCode, error_response
 
 from mcp_docs.app import mcp
+from mcp_docs.models import DocumentNotFoundError
 from mcp_docs.settings import settings
 from mcp_docs.singletons import get_search_engine
 from mcp_docs.tools._validation import validate_doc_type
@@ -180,7 +181,9 @@ async def find_similar_documents(
         limit: Maximum results to return (default 5, max 100)
 
     Returns:
-        List of similar documents with similarity scores, or error dict
+        List of similar documents with similarity scores (empty when the
+        document is indexed but has no similar neighbors), or an error dict
+        when the document is not in the index.
     """
     uuid = parse_uuid_or_none(document_id)
     if uuid is None:
@@ -189,12 +192,12 @@ async def find_similar_documents(
     engine = await get_search_engine()
     limit = validate_limit(limit, default=5)
 
-    results = await engine.find_similar(
-        document_id=uuid,
-        limit=limit,
-    )
-
-    if not results:
+    try:
+        results = await engine.find_similar(
+            document_id=uuid,
+            limit=limit,
+        )
+    except DocumentNotFoundError:
         return error_response(ErrorCode.NOT_FOUND, f"Document not found in index: {document_id}")
 
     return [r.to_dict() for r in results]

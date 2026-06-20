@@ -12,6 +12,7 @@ from vector_core import (
 )
 from vector_core.embeddings.global_vocab import GlobalVocabulary
 
+from mcp_docs.models import DocumentNotFoundError
 from mcp_docs.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -224,7 +225,12 @@ class DocumentSearchEngine:
             exclude_same_document: If True, exclude chunks from same document
 
         Returns:
-            List of similar SearchResults
+            List of similar SearchResults. An empty list means the document is
+            indexed but has no similar neighbors (for example a single-document
+            collection); it does not mean the document is missing.
+
+        Raises:
+            DocumentNotFoundError: If the source document is not in the index.
         """
         await self._ensure_components()
         if self.storage is None:
@@ -241,8 +247,7 @@ class DocumentSearchEngine:
         )
 
         if not results:
-            logger.warning(f"Document not found in index: {document_id}")
-            return []
+            raise DocumentNotFoundError(f"Document not found in index: {document_id}")
 
         # Get the dense vector - we need to retrieve the point with vectors
         # Use the Qdrant client directly for vector retrieval
@@ -263,8 +268,7 @@ class DocumentSearchEngine:
 
         points, _ = scroll_result
         if not points:
-            logger.warning(f"Document not found in index: {document_id}")
-            return []
+            raise DocumentNotFoundError(f"Document not found in index: {document_id}")
 
         source_point = points[0]
 
