@@ -284,3 +284,97 @@ class TestTagFilterNormalization:
         from mcp_docs.search.engine import _normalize_tag_filters
 
         assert _normalize_tag_filters(["", "   ", "real"]) == ["real"]
+
+
+class TestDocumentSearchEngineFindSimilar:
+    """find_similar must distinguish a source document that is absent from the
+    index (raise DocumentNotFoundError) from one that is indexed but simply has
+    no similar neighbors (return an empty list)."""
+
+    @pytest.mark.asyncio
+    async def test_raises_when_source_not_indexed(self) -> None:
+        from mcp_docs.models import DocumentNotFoundError
+
+        engine = DocumentSearchEngine(collection_name="test")
+        mock_storage = AsyncMock()
+        mock_storage.scroll_points.return_value = []  # summary point not in index
+        engine.storage = mock_storage
+
+        with pytest.raises(DocumentNotFoundError):
+            await engine.find_similar(document_id=uuid4())
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_neighbors(self) -> None:
+        """An indexed document with no other similar documents returns []."""
+        doc_id = uuid4()
+        engine = DocumentSearchEngine(collection_name="test")
+
+        mock_storage = AsyncMock()
+        # source summary point exists
+        mock_storage.scroll_points.return_value = [MagicMock()]
+        # the dense-vector lookup returns the source point with a usable vector
+        source_point = MagicMock()
+        source_point.vector = {"dense": [0.1, 0.2, 0.3]}
+        mock_client = AsyncMock()
+        mock_client.scroll.return_value = ([source_point], None)
+        mock_storage.get_client.return_value = mock_client
+        # the only candidate is the same document, excluded -> no neighbors
+        same = MagicMock()
+        same.payload = {"document_id": str(doc_id), "type": "document"}
+        same.score = 1.0
+        mock_storage.query_dense.return_value = [same]
+        engine.storage = mock_storage
+
+        results = await engine.find_similar(document_id=doc_id, exclude_same_document=True)
+        assert results == []
+
+
+class TestFindSimilarDocumentsTool:
+    """find_similar_documents must return an empty list for an indexed document
+    with no neighbors, and only return NOT_FOUND when the document is genuinely
+    absent from the index."""
+
+    @pytest.mark.asyncio
+    async def test_no_neighbors_returns_empty_list(self) -> None:
+        from mcp_docs.tools.search import find_similar_documents
+
+        engine = AsyncMock()
+        engine.find_similar.return_value = []
+        with patch(
+            "mcp_docs.tools.search.get_search_engine", new=AsyncMock(return_value=engine)
+        ):
+            result = await find_similar_documents(str(uuid4()))
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_not_indexed_returns_not_found(self) -> None:
+        from vector_core.errors import ErrorCode
+
+        from mcp_docs.models import DocumentNotFoundError
+        from mcp_docs.tools.search import find_similar_documents
+
+        engine = AsyncMock()
+        engine.find_similar.side_effect = DocumentNotFoundError("nope")
+        with patch(
+            "mcp_docs.tools.search.get_search_engine", new=AsyncMock(return_value=engine)
+        ):
+            result = await find_similar_documents(str(uuid4()))
+        assert isinstance(result, dict)
+        assert result["error_code"] == ErrorCode.NOT_FOUND.value
+
+    @pytest.mark.asyncio
+    async def test_returns_neighbor_dicts(self) -> None:
+        from mcp_docs.tools.search import find_similar_documents
+
+        neighbor = SearchResult(
+            document_id=uuid4(), score=0.9, content="c", point_type="document",
+            filename="n.txt", path="/n.txt", title=None, doc_type="txt", tags=[],
+        )
+        engine = AsyncMock()
+        engine.find_similar.return_value = [neighbor]
+        with patch(
+            "mcp_docs.tools.search.get_search_engine", new=AsyncMock(return_value=engine)
+        ):
+            result = await find_similar_documents(str(uuid4()))
+        assert isinstance(result, list)
+        assert result[0]["filename"] == "n.txt"
