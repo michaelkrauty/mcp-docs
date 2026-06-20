@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.29] - 2026-06-20
+
+### Fixed
+
+- **A vision OCR response with null or absent message content is now handled as an empty page instead of an internal error.** An OpenAI-compatible chat-completions response can legitimately return `"content": null` (a blank or empty generation, common for a blank scanned page). `VisionOCRClient.ocr_image` read the content with no guard and the `: str` annotation was not enforced, so a null value reached `len(content)` in the debug log and raised `TypeError`, which the page handler then reported as a hard OCR failure with a confusing internal message (`object of type 'NoneType' has no len()`). The content is now coerced to an empty string, so a null or blank page contributes empty text cleanly rather than being mislabeled as a failure. `_merge_pages` is also null-safe as defense in depth. (No document-wide crash occurred, because the accidental `TypeError` was caught per page; this makes the handling intentional and the result correct for a blank page.)
+
 ## [1.1.28] - 2026-06-20
 
 ### Changed

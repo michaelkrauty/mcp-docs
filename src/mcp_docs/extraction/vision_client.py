@@ -164,7 +164,12 @@ Begin OCR transcription:"""
             data = resp.json()
             elapsed = time.time() - start_time
 
-            content: str = data["choices"][0]["message"]["content"]
+            # An OpenAI-compatible response can carry a null (or absent)
+            # message content for a blank or empty generation. Treat that as
+            # empty page text rather than letting a None flow downstream (it
+            # would otherwise raise on len()/.strip() and be reported as a
+            # confusing internal failure for what is most likely a blank page).
+            content: str = data["choices"][0]["message"].get("content") or ""
             logger.debug(
                 f"OCR page {page_num} complete in {elapsed:.1f}s, "
                 f"{len(content)} chars extracted"

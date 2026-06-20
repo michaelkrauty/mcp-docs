@@ -329,11 +329,11 @@ def _merge_pages(page_texts: list[str]) -> str:
         return ""
 
     if len(page_texts) == 1:
-        return page_texts[0].strip()
+        return (page_texts[0] or "").strip()
 
     parts = []
     for i, text in enumerate(page_texts, 1):
-        stripped = text.strip()
+        stripped = (text or "").strip()
         if stripped:
             parts.append(f"--- Page {i} ---\n\n{stripped}")
 
