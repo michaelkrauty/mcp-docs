@@ -89,6 +89,32 @@ class TestToolsRejectInvalidDocType:
         assert result["error_code"] == ErrorCode.INVALID_INPUT.value
         get_engine.assert_not_called()
 
+
+class TestListDocumentsExtractionStatusValidation:
+    """The invalid-extraction_status error lists every valid value, derived
+    from the enum so it cannot drift as new statuses are added."""
+
+    async def test_invalid_status_error_lists_all_enum_values(self):
+        store = MagicMock()
+        with patch("mcp_docs.tools.documents.get_document_store", return_value=store):
+            result = await list_documents(extraction_status="bogus")
+        assert is_error_response(result)
+        assert result["error_code"] == ErrorCode.INVALID_INPUT.value
+        for status in ExtractionStatus:
+            assert status.value in result["message"], status.value
+        store.list_summaries.assert_not_called()
+
+    async def test_cancelled_status_is_accepted(self):
+        store = MagicMock()
+        store.list_summaries.return_value = []
+        with patch("mcp_docs.tools.documents.get_document_store", return_value=store):
+            result = await list_documents(extraction_status="cancelled")
+        assert not is_error_response(result)
+        assert (
+            store.list_summaries.call_args.kwargs["extraction_status"]
+            == ExtractionStatus.CANCELLED
+        )
+
     async def test_search_documents_passes_normalized_doc_type_to_engine(self):
         # A valid but wrong-case doc_type must reach the engine normalized.
         engine = AsyncMock()

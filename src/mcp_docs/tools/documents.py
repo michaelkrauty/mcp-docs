@@ -274,7 +274,7 @@ async def list_documents(
         extraction_status: Filter by extraction status (queued, processing, extracted, etc.)
         doc_type: Filter by document type (pdf, docx, txt, md, etc.)
         document_root: Filter by document root path
-        limit: Maximum documents to return (default 50, max 100)
+        limit: Maximum documents to return (default 50)
 
     Returns:
         List of document summary dicts, or error dict on invalid input
@@ -288,9 +288,10 @@ async def list_documents(
         try:
             status_enum = DocumentStatus(status.lower())
         except ValueError:
+            valid = ", ".join(s.value for s in DocumentStatus)
             return error_response(
                 ErrorCode.INVALID_INPUT,
-                f"Invalid status: {status}. Valid values: active, modified, relocated, deleted",
+                f"Invalid status: {status}. Valid values: {valid}",
             )
 
     extraction_enum = None
@@ -298,10 +299,10 @@ async def list_documents(
         try:
             extraction_enum = ExtractionStatus(extraction_status.lower())
         except ValueError:
+            valid = ", ".join(s.value for s in ExtractionStatus)
             return error_response(
                 ErrorCode.INVALID_INPUT,
-                f"Invalid extraction_status: {extraction_status}. "
-                "Valid values: queued, processing, extracted, failed, indexed",
+                f"Invalid extraction_status: {extraction_status}. Valid values: {valid}",
             )
 
     doc_type_value, doc_type_error = validate_doc_type(doc_type)

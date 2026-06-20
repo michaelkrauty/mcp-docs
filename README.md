@@ -148,7 +148,7 @@ claude mcp add docs \
 | PowerPoint | `.pptx` | Slide text via MarkItDown + metadata via python-pptx |
 | PowerPoint (legacy) | `.ppt` | Best-effort via MarkItDown; may require conversion |
 | Excel | `.xlsx`, `.xls` | Spreadsheet to markdown table via MarkItDown |
-| CSV | `.csv` | Markdown table representation |
+| CSV | `.csv` | Markdown table via the csv module, with encoding fallback (utf-8-sig, utf-8, cp1252, latin-1) for non-ASCII exports |
 | EPUB | `.epub` | E-book text extraction via MarkItDown |
 | XML | `.xml` | XML content extraction via MarkItDown |
 | Text | `.txt`, `.md` | Direct text / markdown with title extraction |
@@ -253,5 +253,6 @@ External libraries:
 - pypdf (PDF extraction)
 - python-docx (DOCX metadata)
 - python-pptx (PPTX metadata)
-- markitdown (unified text conversion for DOCX, PPTX, XLSX, CSV, EPUB, XML, HTML, TXT)
+- markitdown (unified text conversion for DOCX, PPTX, XLSX, EPUB, XML, HTML, TXT)
+- Python standard-library csv module (CSV tables, with encoding fallback across utf-8-sig, utf-8, cp1252, and latin-1)
 - striprtf (RTF extraction)
