@@ -143,6 +143,12 @@ async def keyword_search(
     scroll_filter = Filter(**filter_dict)
     page_size = min(max(limit * 2, 64), 512)
     max_scan = max(limit * 20, 2000)
+    # Return only the metadata fields the result uses. Fetching every scanned
+    # chunk point's full `content` body while paginating would transfer large
+    # text the result never reads, which is costly on the content-heavy matches
+    # this pagination exists to handle. The filter still matches on content
+    # server-side; this only limits what is returned.
+    payload_fields = ["document_id", "filename", "path", "doc_type", "title", "tags"]
 
     # Deduplicate by document_id and build results
     seen_docs: set[str] = set()
@@ -156,7 +162,7 @@ async def keyword_search(
             scroll_filter=scroll_filter,
             limit=min(page_size, max_scan - scanned),
             offset=offset,
-            with_payload=True,
+            with_payload=payload_fields,
         )
         if not points:
             break

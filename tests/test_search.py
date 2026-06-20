@@ -424,6 +424,11 @@ class TestKeywordSearchPagination:
         assert isinstance(result, list)
         # Must collect 3 distinct docs across both pages, not stop at [A, B].
         assert [r["document_id"] for r in result] == ["A", "B", "C"]
+        # Only metadata fields are fetched, never the large chunk `content`.
+        with_payload = mock_client.scroll.await_args_list[0].kwargs["with_payload"]
+        assert isinstance(with_payload, list)
+        assert "content" not in with_payload
+        assert "document_id" in with_payload
 
     @pytest.mark.asyncio
     async def test_stops_at_limit_without_extra_scroll(self) -> None:
