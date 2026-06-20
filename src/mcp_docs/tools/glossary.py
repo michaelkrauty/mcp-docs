@@ -77,7 +77,7 @@ async def search_glossary(
     Args:
         query: Natural language search query
         domain: Optional domain filter
-        limit: Max results (default 10, max 100)
+        limit: Max results (default 10)
 
     Returns:
         List of matching entries with relevance scores, or error dict
@@ -97,7 +97,7 @@ async def list_glossary(
 
     Args:
         domain: Optional domain filter
-        limit: Max results (default 50, max 100)
+        limit: Max results (default 50)
 
     Returns:
         List of glossary entry summaries

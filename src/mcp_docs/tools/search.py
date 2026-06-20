@@ -34,7 +34,7 @@ async def search_documents(
 
     Args:
         query: Natural language search query
-        limit: Maximum results to return (default 10, max 100)
+        limit: Maximum results to return (default 10)
         doc_type: Filter by document type (pdf, docx, txt, md, etc.)
         tags: Filter by tags (document must have ALL tags)
         include_chunks: If True, search within document chunks.
@@ -178,7 +178,7 @@ async def find_similar_documents(
 
     Args:
         document_id: Document UUID string
-        limit: Maximum results to return (default 5, max 100)
+        limit: Maximum results to return (default 5)
 
     Returns:
         List of similar documents with similarity scores (empty when the

@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.1.26] - 2026-06-20
+
+### Fixed
+
+- **`list_documents` now lists every valid `extraction_status` in its invalid-value error, including `cancelled`.** The error message hardcoded the valid values and was never updated when the `cancelled` status was added, so a user who passed an invalid status was told the valid set was `queued, processing, extracted, failed, indexed`, omitting `cancelled`. The message (and the sibling `status` message) is now derived from the enum, so it cannot drift as statuses change. The `cancelled` value itself was already accepted as a filter; only the help text was incomplete.
+
+### Changed
+
+- Corrected stale documentation. Several tool docstrings claimed `limit` had a `max 100`, but the real cap is effectively unlimited (`validate_limit` allows up to 100000); those docstrings now state only the default. The README attributed CSV extraction to MarkItDown, but since v1.1.11 CSV is extracted with the Python standard-library `csv` module and an encoding fallback (utf-8-sig, utf-8, cp1252, latin-1); the README now describes the real mechanism. No behavior change.
+
 ## [1.1.25] - 2026-06-20
 
 ### Fixed
