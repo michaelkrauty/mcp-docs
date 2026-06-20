@@ -127,8 +127,12 @@ async def move_file(source_path: str, destination_path: str) -> dict:
 
         dest_root = _find_document_root(dest, store)
 
-        # 5. Wait for document processing to complete
-        processing_complete = await processor.wait_for_documents([document.id], timeout=60.0)
+        # 5. Wait for document processing to finish (terminal state). A failed
+        # or cancelled document is terminal and safe to move; only a document
+        # still being processed must block, so we do not require COMPLETED.
+        processing_complete = await processor.wait_for_documents(
+            [document.id], timeout=60.0, require_completed=False
+        )
         if not processing_complete:
             return error_response(
                 ErrorCode.TIMEOUT,
@@ -263,7 +267,11 @@ async def rename_directory(path: str, new_name: str) -> dict:
         if docs_to_update:
             # 4. Wait for any processing docs to complete
             doc_ids = [doc.id for doc in docs_to_update]
-            processing_complete = await processor.wait_for_documents(doc_ids, timeout=120.0)
+            # A failed or cancelled document is terminal and safe to move;
+            # only a document still being processed must block.
+            processing_complete = await processor.wait_for_documents(
+                doc_ids, timeout=120.0, require_completed=False
+            )
             if not processing_complete:
                 return error_response(
                     ErrorCode.TIMEOUT,
@@ -376,7 +384,11 @@ async def move_directory(source_path: str, destination_path: str) -> dict:
         if docs_to_update:
             # 5. Wait for any processing docs to complete
             doc_ids = [doc.id for doc in docs_to_update]
-            processing_complete = await processor.wait_for_documents(doc_ids, timeout=120.0)
+            # A failed or cancelled document is terminal and safe to move;
+            # only a document still being processed must block.
+            processing_complete = await processor.wait_for_documents(
+                doc_ids, timeout=120.0, require_completed=False
+            )
             if not processing_complete:
                 return error_response(
                     ErrorCode.TIMEOUT,

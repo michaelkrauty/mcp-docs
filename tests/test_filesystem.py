@@ -124,7 +124,9 @@ class TestMoveFile:
         assert updated_doc.path == dest_path
         
         # Check processor and indexer called
-        mock_processor.wait_for_documents.assert_called_once_with([registered_doc.id], timeout=60.0)
+        mock_processor.wait_for_documents.assert_called_once_with(
+            [registered_doc.id], timeout=60.0, require_completed=False
+        )
         mock_indexer.update_document_path_in_index.assert_called_once_with(registered_doc.id, dest_path)
 
     @pytest.mark.asyncio
@@ -342,7 +344,9 @@ class TestRenameDirectory:
         assert (doc_root / "renamed_subdir").exists()
         
         # Check processor and indexer called
-        mock_processor.wait_for_documents.assert_called_once_with([doc1.id, doc2.id], timeout=120.0)
+        mock_processor.wait_for_documents.assert_called_once_with(
+            [doc1.id, doc2.id], timeout=120.0, require_completed=False
+        )
         mock_indexer.update_paths_batch_in_index.assert_called_once()
 
     @pytest.mark.asyncio

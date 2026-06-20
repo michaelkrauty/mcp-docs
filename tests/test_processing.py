@@ -253,6 +253,66 @@ class TestDocumentProcessor:
             await processor.stop()
 
 
+class TestWaitForDocumentsTerminal:
+    """wait_for_documents(require_completed=False) lets directory operations
+    proceed once a document is in a terminal state, even if that state is
+    FAILED or CANCELLED rather than COMPLETED. A genuinely still-processing
+    document still blocks."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "status", [ExtractionStatus.FAILED, ExtractionStatus.CANCELLED]
+    )
+    async def test_terminal_non_completed_accepted_when_not_requiring_completion(
+        self, store: DocumentStore, sample_file: Path, status: ExtractionStatus
+    ) -> None:
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        store.update(doc.id, extraction_status=status)
+        processor = DocumentProcessor(store, max_workers=0)
+
+        # Default (require_completed=True) treats a terminal-but-not-completed
+        # document as "not done", which wrongly blocks moves/renames.
+        assert await processor.wait_for_documents([doc.id], timeout=1.0) is False
+        # require_completed=False accepts any terminal state.
+        assert (
+            await processor.wait_for_documents(
+                [doc.id], timeout=1.0, require_completed=False
+            )
+            is True
+        )
+
+    @pytest.mark.asyncio
+    async def test_still_queued_document_times_out_regardless(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        # Registered but never processed (no workers): genuinely still pending.
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        processor = DocumentProcessor(store, max_workers=0)
+
+        assert (
+            await processor.wait_for_documents(
+                [doc.id], timeout=0.1, require_completed=False
+            )
+            is False
+        )
+
+    @pytest.mark.asyncio
+    async def test_completed_document_accepted_either_way(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        store.update(doc.id, extraction_status=ExtractionStatus.INDEXED)
+        processor = DocumentProcessor(store, max_workers=0)
+
+        assert await processor.wait_for_documents([doc.id], timeout=1.0) is True
+        assert (
+            await processor.wait_for_documents(
+                [doc.id], timeout=1.0, require_completed=False
+            )
+            is True
+        )
+
+
 class TestCancel:
     """cancel() must only cancel queued documents and record a CANCELLED
     status, never clobbering completed work or marking a cancellation as a

@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.21] - 2026-06-19
+
+### Fixed
+
+- **`move_file`, `rename_directory`, and `move_directory` no longer refuse to move a document whose extraction permanently failed or was cancelled.** The move and rename tools wait for processing to finish before touching the file, but they gated on `wait_for_documents`, which only reports success when every document reaches `COMPLETED`. A document in a terminal `FAILED` or `CANCELLED` state never becomes `COMPLETED`, so the operation returned `TIMEOUT` ("Document processing did not complete within timeout") and the file could never be moved or renamed, even though nothing was processing it and no timeout had actually elapsed. For example, a directory holding a DRM-protected or otherwise unextractable file became permanently un-movable. The tools now pass `require_completed=False`, so any terminal state (completed, failed, or cancelled) lets the operation proceed; a document genuinely still queued or processing still blocks until it finishes or the wait times out.
+
 ## [1.1.20] - 2026-06-19
 
 ### Changed
