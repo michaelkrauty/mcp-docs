@@ -194,6 +194,9 @@ class DocumentProcessor:
         self.completed: dict[UUID, ProcessingResult] = {}  # LRU: oldest first
         # Waiting events with creation time for stale cleanup: (event, created_at)
         self.waiting: dict[UUID, tuple[asyncio.Event, datetime]] = {}
+        # Active waiters per document, so one waiter's timeout does not remove
+        # the shared event that other waiters (and the worker signal) still need.
+        self._waiter_counts: dict[UUID, int] = {}
         self._waiting_timeout_seconds = 3600  # 1 hour max wait before cleanup
         self.cancelled: set[UUID] = set()  # Track cancelled document IDs
 
@@ -500,9 +503,13 @@ class DocumentProcessor:
                 if terminal is not None:
                     return terminal
 
-            # Create wait event if needed (atomic with completed check)
+            # Create wait event if needed (atomic with completed check).
+            # Concurrent callers share one event; count active waiters so a
+            # single waiter's timeout does not remove the entry the worker
+            # signal and the other waiters still depend on.
             if document_id not in self.waiting:
                 self.waiting[document_id] = (asyncio.Event(), datetime.now(UTC))
+            self._waiter_counts[document_id] = self._waiter_counts.get(document_id, 0) + 1
 
             event, _ = self.waiting[document_id]
 
@@ -511,10 +518,23 @@ class DocumentProcessor:
             await asyncio.wait_for(event.wait(), timeout=timeout)
             return self.completed.get(document_id)
         except TimeoutError:
-            # Clean up stale waiting event on timeout to prevent unbounded growth
-            self.waiting.pop(document_id, None)
             logger.warning(f"Timeout waiting for document {document_id}")
-            return None
+            # The worker caches the result before signalling, and a peer
+            # waiter's timeout cannot orphan this one anymore, but the result
+            # may still have completed during the wait; re-check before giving
+            # up so a late waiter recovers it instead of falsely timing out.
+            return self.completed.get(document_id)
+        finally:
+            # Drop this waiter and only remove the shared event once no waiter
+            # remains. This both prevents one timeout from orphaning peers and
+            # cleans up the event when the last waiter leaves (timeout or done).
+            async with self._wait_lock:
+                remaining = self._waiter_counts.get(document_id, 1) - 1
+                if remaining <= 0:
+                    self._waiter_counts.pop(document_id, None)
+                    self.waiting.pop(document_id, None)
+                else:
+                    self._waiter_counts[document_id] = remaining
 
     def _terminal_result_from_db(self, document_id: UUID) -> ProcessingResult | None:
         """
@@ -755,6 +775,7 @@ class DocumentProcessor:
             del self.completed[oldest_id]
             # Also clean up any stale waiting events
             self.waiting.pop(oldest_id, None)
+            self._waiter_counts.pop(oldest_id, None)
 
         # Periodically clean up stale waiting events (every 100 cache writes)
         if len(self.completed) % 100 == 0:
@@ -775,6 +796,7 @@ class DocumentProcessor:
         ]
         for doc_id in stale:
             self.waiting.pop(doc_id, None)
+            self._waiter_counts.pop(doc_id, None)
             logger.debug(f"Cleaned up stale waiting event for document {doc_id}")
 
     async def _worker(self, worker_id: int) -> None:
@@ -805,12 +827,13 @@ class DocumentProcessor:
                     result = await self._process(task)
                     self._cache_result(task.document_id, result)
 
-                    # Notify waiters and clean up event to prevent memory leak
+                    # Notify any waiters. The shared event is removed by the
+                    # last waiter's cleanup (it is reference-counted), so the
+                    # worker only signals; deleting it here would race a waiter
+                    # that has not yet observed the signal.
                     if task.document_id in self.waiting:
                         event, _ = self.waiting[task.document_id]
                         event.set()
-                        # Clean up the event after signaling to prevent unbounded growth
-                        del self.waiting[task.document_id]
 
                     # Callback
                     if self.on_complete:
