@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.37] - 2026-06-20
+
+### Fixed
+
+- **`rename_directory` now rejects a directory that lies outside every registered document root**, instead of renaming it. It was the only directory-mutating tool that never validated its target against the document roots: `move_directory` and `create_directory` both reject an out-of-root path with `PERMISSION_DENIED`, but `rename_directory` only checked that the path existed and was a directory, then renamed it unconditionally (the document queries simply returned nothing for an out-of-root path). It now applies the same within-root guard as its siblings, so the directory-operation scope boundary is enforced consistently.
+
 ## [1.1.36] - 2026-06-20
 
 ### Fixed
