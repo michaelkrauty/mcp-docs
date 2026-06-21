@@ -3,6 +3,7 @@
 import os
 import tempfile
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -155,6 +156,41 @@ class TestDocumentScanner:
 
         assert result.files_modified == 1
         assert result.files_new == 0
+
+    @pytest.mark.asyncio
+    async def test_scan_root_does_not_loop_on_hash_collision(
+        self, store: DocumentStore, document_root: Path
+    ) -> None:
+        """A file edited to byte-match an already-registered file must not be
+        re-flagged as modified and re-enqueued on every scan. Its new hash
+        already belongs to the other document, so the content_hash UNIQUE
+        constraint drops the hash update; without a guard the scanner would
+        re-detect it as modified forever and re-extract/re-embed it."""
+        scanner = DocumentScanner(store, recursive=True)
+        root = store.add_root(str(document_root))
+        await scanner.scan_root(root)
+
+        file1 = document_root / "file1.txt"
+        file1_doc = next(
+            d
+            for d in store.list_summaries(document_root=str(document_root))
+            if d.path == str(file1)
+        )
+
+        # Edit file1 to be byte-identical to file2 (hash collision).
+        file1.write_text((document_root / "file2.md").read_text())
+
+        enqueued: list[UUID] = []
+
+        async def enqueue_cb(doc_id: UUID, path: Path) -> None:
+            enqueued.append(doc_id)
+
+        # Repeated scans must not perpetually re-flag/re-enqueue the duplicate.
+        await scanner.scan_root(root, enqueue_callback=enqueue_cb)
+        result = await scanner.scan_root(root, enqueue_callback=enqueue_cb)
+
+        assert result.files_modified == 0
+        assert file1_doc.id not in enqueued
 
     @pytest.mark.asyncio
     async def test_scan_root_detects_deletions(

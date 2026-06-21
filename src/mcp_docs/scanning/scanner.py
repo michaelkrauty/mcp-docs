@@ -265,16 +265,48 @@ class DocumentScanner:
                         existing_full = self.document_store.read(existing.id)
 
                         if existing_full and existing_full.content_hash != content_hash:
-                            # File modified
-                            self.document_store.update(
-                                existing.id,
-                                content_hash=content_hash,
-                                status=DocumentStatus.MODIFIED,
-                            )
-                            result.files_modified += 1
+                            hash_owner = self.document_store.get_by_hash(content_hash)
+                            if (
+                                hash_owner is not None
+                                and hash_owner.id != existing.id
+                                and hash_owner.status != DocumentStatus.DELETED
+                                and os.path.exists(hash_owner.path)
+                            ):
+                                # The new content's hash already belongs to another
+                                # LIVE document whose file still exists, so the
+                                # content_hash UNIQUE constraint would silently drop
+                                # this document's hash update. Re-marking it modified
+                                # and re-enqueuing it would therefore re-extract and
+                                # re-embed it on every scan forever. Skip the modified
+                                # handling for the duplicate to stop the loop (its
+                                # content is still searchable via the live file it
+                                # duplicates). Only an owner that is not deleted AND
+                                # still present on disk is treated this way; if the
+                                # owner has been or is being deleted, fall through so
+                                # the surviving file is still re-indexed rather than
+                                # left unsearchable.
+                                #
+                                # NOTE: this document's previously-indexed (now
+                                # stale) points are left in place; cleaning them up
+                                # for the duplicate is non-trivial (it interacts with
+                                # the deletion pass, in-flight processing, and the
+                                # soft-deleted hash owner) and is tracked separately.
+                                logger.warning(
+                                    f"{path_str} now duplicates {hash_owner.path} "
+                                    f"(content hash {content_hash[:16]}...); skipping "
+                                    f"re-index to avoid a modified-detection loop"
+                                )
+                            else:
+                                # File modified
+                                self.document_store.update(
+                                    existing.id,
+                                    content_hash=content_hash,
+                                    status=DocumentStatus.MODIFIED,
+                                )
+                                result.files_modified += 1
 
-                            if enqueue_callback:
-                                await enqueue_callback(existing.id, file_path)
+                                if enqueue_callback:
+                                    await enqueue_callback(existing.id, file_path)
                         elif existing_full and existing_full.status != DocumentStatus.ACTIVE:
                             # File unchanged but was marked deleted/etc - restore to active
                             self.document_store.update(
