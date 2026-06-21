@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.39] - 2026-06-20
+
+### Fixed
+
+- **`register_document` no longer stores a blank tag when given a whitespace-only tag.** `register()` normalized tags with `tag.lower().strip()` but, unlike `update_tags()`, did not drop tags that are empty after stripping, so a whitespace-only tag was stored as an empty string in the document tags and propagated to every index point's tag payload. The same tag list passed to `update_document_tags` dropped it, so the two write paths disagreed. `register()` now applies the same `if normalized:` guard as `update_tags()`.
+
 ## [1.1.38] - 2026-06-20
 
 ### Fixed

@@ -214,13 +214,17 @@ class DocumentStore(ThreadSafeSQLiteStore):
                 existing = self.read(existing.id)
             return existing
 
-        # New document - add tags
+        # New document - add tags. Mirror update_tags(): drop blank/whitespace
+        # tags so register and update_tags agree on an identical tag list and no
+        # empty-string tag enters stored state or the index payload.
         if tags:
             for tag in tags:
-                conn.execute(
-                    "INSERT OR IGNORE INTO document_tags (document_id, tag) VALUES (?, ?)",
-                    (str(doc_id), tag.lower().strip()),
-                )
+                normalized = tag.lower().strip()
+                if normalized:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO document_tags (document_id, tag) VALUES (?, ?)",
+                        (str(doc_id), normalized),
+                    )
 
         conn.commit()
         return self.read(doc_id)

@@ -94,6 +94,17 @@ class TestDocumentStoreBasic:
 
         assert set(doc.tags) == {"test", "sample"}
 
+    def test_register_drops_blank_tags(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        """A whitespace-only/empty tag is dropped at registration, matching
+        update_tags (which guards `if normalized:`); otherwise register would
+        store an empty-string tag that update_tags filters out."""
+        content_hash = compute_file_hash(sample_file)
+        doc = store.register(sample_file, content_hash, tags=["Finance", "  ", ""])
+
+        assert set(doc.tags) == {"finance"}
+
     def test_read_document(self, store: DocumentStore, sample_file: Path) -> None:
         """Can read a registered document."""
         content_hash = compute_file_hash(sample_file)
