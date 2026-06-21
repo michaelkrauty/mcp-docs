@@ -421,10 +421,115 @@ class TestRenameDirectory:
         subdir.mkdir()
         
         result = await rename_directory(str(subdir), "invalid/name")
-        
+
         assert "error_code" in result
         assert result["error_code"] == ErrorCode.INVALID_INPUT.value
         assert "path separators" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_rename_directory_rejects_path_outside_root(
+        self,
+        mock_store: DocumentStore,
+        mock_processor: AsyncMock,
+        mock_indexer: AsyncMock,
+        temp_dir: Path,
+    ):
+        """A directory outside every document root is rejected, unrenamed
+        (mirrors move_directory/create_directory's scope guard)."""
+        reg_root = temp_dir / "reg_root"
+        reg_root.mkdir()
+        mock_store.add_root(str(reg_root), name="Reg Root")
+
+        # Target lives outside any registered root.
+        outside = temp_dir / "outside"
+        outside.mkdir()
+        (outside / "file.txt").write_text("content")
+
+        result = await rename_directory(str(outside), "renamed")
+
+        assert "error_code" in result
+        assert result["error_code"] == ErrorCode.PERMISSION_DENIED.value
+        # Nothing was renamed and the index was not touched.
+        assert outside.exists()
+        assert not (temp_dir / "renamed").exists()
+        mock_indexer.update_paths_batch_in_index.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rename_directory_rejects_renaming_root_itself(
+        self,
+        mock_store: DocumentStore,
+        mock_processor: AsyncMock,
+        mock_indexer: AsyncMock,
+        temp_dir: Path,
+    ):
+        """Renaming a registered root itself is rejected: it would strand the
+        root's document_roots entry at the old path."""
+        root = temp_dir / "the_root"
+        root.mkdir()
+        mock_store.add_root(str(root), name="The Root")
+
+        result = await rename_directory(str(root), "renamed_root")
+
+        assert "error_code" in result
+        assert result["error_code"] == ErrorCode.INVALID_INPUT.value
+        assert root.exists()
+        assert not (temp_dir / "renamed_root").exists()
+        mock_indexer.update_paths_batch_in_index.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rename_directory_rejects_nested_registered_root(
+        self,
+        mock_store: DocumentStore,
+        mock_processor: AsyncMock,
+        mock_indexer: AsyncMock,
+        temp_dir: Path,
+    ):
+        """A registered root nested under another root cannot be renamed: both
+        ends pass the within-root check via the parent, so the explicit
+        exact-root check is what prevents stranding its document_roots entry."""
+        parent = temp_dir / "parent"
+        parent.mkdir()
+        mock_store.add_root(str(parent), name="Parent")
+        child = parent / "child"
+        child.mkdir()
+        mock_store.add_root(str(child), name="Child")
+
+        result = await rename_directory(str(child), "renamed_child")
+
+        assert "error_code" in result
+        assert result["error_code"] == ErrorCode.INVALID_INPUT.value
+        assert child.exists()
+        assert not (parent / "renamed_child").exists()
+        mock_indexer.update_paths_batch_in_index.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rename_directory_rejects_dir_containing_registered_root(
+        self,
+        mock_store: DocumentStore,
+        mock_processor: AsyncMock,
+        mock_indexer: AsyncMock,
+        temp_dir: Path,
+    ):
+        """A directory that is not itself a root but contains a registered root
+        beneath it cannot be renamed: the move would strand the nested root's
+        document_roots entry at the old path."""
+        parent = temp_dir / "parent"
+        parent.mkdir()
+        mock_store.add_root(str(parent), name="Parent")
+        team = parent / "team"
+        team.mkdir()
+        nested_root = team / "root"
+        nested_root.mkdir()
+        mock_store.add_root(str(nested_root), name="Nested")
+
+        # 'team' is not itself a root, but renaming it would move nested_root.
+        result = await rename_directory(str(team), "renamed_team")
+
+        assert "error_code" in result
+        assert result["error_code"] == ErrorCode.INVALID_INPUT.value
+        assert team.exists()
+        assert not (parent / "renamed_team").exists()
+        mock_indexer.update_paths_batch_in_index.assert_not_called()
 
 
 class TestMoveDirectory:

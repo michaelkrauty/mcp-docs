@@ -273,11 +273,53 @@ async def rename_directory(path: str, new_name: str) -> dict:
                 "New name must not contain path separators",
             )
 
-        # 3. Query all documents under path prefix
+        new_path = dir_path.parent / new_name
+
+        # 3. A rename must not move any registered document root. If dir_path is
+        # itself a root, or contains one beneath it, the move would rewrite
+        # document paths but leave that root's document_roots row pointing at the
+        # old (now nonexistent) path, so later scans/root operations target a
+        # missing directory. (A nested root would otherwise pass the within-root
+        # check below via its parent.) Renaming a root is a root-management
+        # operation.
+        dir_str = str(dir_path)
+        contained_root = next(
+            (
+                r
+                for r in store.list_roots()
+                if r.path == dir_str or r.path.startswith(dir_str + "/")
+            ),
+            None,
+        )
+        if contained_root is not None:
+            return error_response(
+                ErrorCode.INVALID_INPUT,
+                f"Cannot rename a directory that is or contains a registered "
+                f"document root ({contained_root.path}). Use remove_document_root "
+                "and add_document_root instead.",
+            )
+
+        # 4. Validate both the directory and its destination are within document
+        # roots, mirroring move_directory and create_directory. This rejects
+        # renaming a directory that lies entirely outside every registered root.
+        src_valid, src_root = _validate_within_root(dir_path, store)
+        if not src_valid:
+            return error_response(
+                ErrorCode.PERMISSION_DENIED,
+                f"Path not in document root: {src_root}",
+            )
+        dest_valid, dest_root = _validate_within_root(new_path, store)
+        if not dest_valid:
+            return error_response(
+                ErrorCode.PERMISSION_DENIED,
+                f"Destination not in document root: {dest_root}",
+            )
+
+        # 5. Query all documents under path prefix
         docs_to_update = store.query_by_path_prefix(str(dir_path) + "/")
 
         if docs_to_update:
-            # 4. Wait for any processing docs to complete
+            # 6. Wait for any processing docs to complete
             doc_ids = [doc.id for doc in docs_to_update]
             # A failed or cancelled document is terminal and safe to move;
             # only a document still being processed must block.
@@ -290,30 +332,27 @@ async def rename_directory(path: str, new_name: str) -> dict:
                     "Document processing did not complete within timeout",
                 )
 
-        # 5. Calculate new_path = parent / new_name
-        new_path = dir_path.parent / new_name
-
-        # 6. Validate new_path doesn't exist
+        # 7. Validate new_path doesn't exist
         if new_path.exists():
             return error_response(ErrorCode.CONFLICT, f"Destination already exists: {new_path}")
 
-        # 7. Move directory
+        # 8. Move directory
         try:
             shutil.move(str(dir_path), str(new_path))
         except OSError as e:
             return error_response(ErrorCode.INVALID_INPUT, f"Failed to rename directory: {e}")
 
-        # 8. Update document paths in batch
+        # 9. Update document paths in batch
         old_prefix = str(dir_path)
         new_prefix = str(new_path)
         docs_updated = store.update_paths_batch(old_prefix, new_prefix)
 
-        # 9. Update document_root if needed
+        # 10. Update document_root if needed
         new_root = _find_document_root(new_path, store)
         if new_root:
             store.update_document_roots_batch(new_prefix, new_root)
 
-        # 10. Update vector index paths in batch
+        # 11. Update vector index paths in batch
         await indexer.update_paths_batch_in_index(old_prefix, new_prefix)
 
         logger.info(f"Renamed directory {dir_path} -> {new_path}, updated {docs_updated} documents")
@@ -373,9 +412,9 @@ async def move_directory(source_path: str, destination_path: str) -> dict:
 
         # 3. Validate both source and destination are within document roots.
         # Without this, move_directory would operate on arbitrary filesystem
-        # paths (unlike move_file/rename_directory) and, when the destination
-        # falls outside every root, would leave the moved documents pointing at
-        # a document_root that no longer contains them.
+        # paths (unlike move_file, which requires a registered document) and,
+        # when the destination falls outside every root, would leave the moved
+        # documents pointing at a document_root that no longer contains them.
         source_valid, source_root = _validate_within_root(source, store)
         if not source_valid:
             return error_response(
