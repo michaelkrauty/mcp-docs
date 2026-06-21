@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.35] - 2026-06-20
+
+### Changed
+
+- Bump vector-core to v1.2.11 (atomic `index_fact` re-indexing in the shared facts indexer).
+
 ## [1.1.34] - 2026-06-20
 
 ### Fixed
