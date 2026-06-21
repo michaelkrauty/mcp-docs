@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.38] - 2026-06-20
+
+### Fixed
+
+- **Cancelling a queued document now wakes any `wait_for_document` caller immediately instead of stalling it for the full timeout.** The only path that signalled a document's wait event was the worker's process-completion path; the worker's cancelled-task skip and `cancel()` itself never signalled it or cached a result. So a `wait_for_document` caller that began waiting while the document was still queued (and therefore parked on the wait event) was never woken when the document was cancelled: it blocked for the entire timeout (default 5 minutes) and then returned a misleading `TIMEOUT` error, even though the document reached the terminal `CANCELLED` state within milliseconds. `cancel()` now caches the terminal `CANCELLED` result and sets the wait event, so the caller returns the correct cancelled status promptly. This also unblocks `move_file`/`move_directory`/`rename_directory`, which wait on documents and could stall for the full timeout if a document was cancelled mid-wait.
+
 ## [1.1.37] - 2026-06-20
 
 ### Fixed

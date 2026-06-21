@@ -736,6 +736,19 @@ class DocumentProcessor:
                 extraction_status=ExtractionStatus.CANCELLED,
                 extraction_error=None,
             )
+            # Wake any waiter already blocked on this document. The worker's
+            # cancel-skip path never signals the wait event, so without this a
+            # wait_for() already parked on the event (because the document was
+            # still QUEUED when it began waiting) would block for the full
+            # timeout and then return None / a misleading TIMEOUT. Cache the
+            # terminal CANCELLED result and set the event, mirroring the worker
+            # completion path.
+            result = self._terminal_result_from_db(document_id)
+            if result is not None:
+                self._cache_result(document_id, result)
+                if document_id in self.waiting:
+                    event, _ = self.waiting[document_id]
+                    event.set()
             return True
         except Exception as e:
             logger.warning(f"Failed to cancel document {document_id}: {e}")

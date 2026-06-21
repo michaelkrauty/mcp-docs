@@ -337,6 +337,30 @@ class TestCancel:
         assert doc.id in processor.cancelled
 
     @pytest.mark.asyncio
+    async def test_wait_for_cancelled_while_blocked_returns_promptly(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        """A waiter already blocked on a QUEUED document wakes promptly with a
+        CANCELLED result when the document is cancelled, instead of blocking for
+        the full timeout and returning a misleading None/TIMEOUT."""
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        assert store.read(doc.id).extraction_status == ExtractionStatus.QUEUED
+
+        processor = DocumentProcessor(store, max_workers=0)  # no workers
+
+        # The doc is QUEUED (non-terminal), so this parks on the wait event.
+        waiter = asyncio.create_task(processor.wait_for(doc.id, timeout=30))
+        await asyncio.sleep(0.05)
+        assert not waiter.done()
+
+        assert processor.cancel(doc.id) is True
+
+        # Must resolve well within the 30s wait, not block until timeout.
+        result = await asyncio.wait_for(waiter, timeout=2.0)
+        assert result is not None
+        assert result.status == ProcessingStatus.CANCELLED
+
+    @pytest.mark.asyncio
     async def test_cancel_does_not_clobber_indexed(
         self, store: DocumentStore, sample_file: Path
     ) -> None:
