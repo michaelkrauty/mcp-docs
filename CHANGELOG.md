@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.36] - 2026-06-20
+
+### Fixed
+
+- **A file edited to have the same content as another registered document no longer re-extracts on every scan forever.** The scanner detects a modification as a content-hash change and re-marks the document modified and re-enqueues it for extraction. But when the new content's hash already belongs to another document, `DocumentStore.update` silently drops the hash write (the `content_hash` unique constraint), so the stored hash never advances and every subsequent scan re-detected it as modified and re-extracted and re-embedded it indefinitely (a perpetual cost on the background scan). The scanner now detects that the new content already belongs to another document and skips the modification handling for the duplicate, so the loop no longer occurs (the content remains searchable via the file it duplicates).
+
 ## [1.1.35] - 2026-06-20
 
 ### Changed
