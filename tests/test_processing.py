@@ -603,3 +603,34 @@ class TestConcurrentWaitFor:
         assert a is None  # short waiter timed out
         assert b is result  # long waiter was not orphaned and recovered the result
         assert elapsed < 1.5  # long waiter woke on the signal, not after its 2.0s timeout
+
+
+class TestEnqueueInvalidatesCompletedCache:
+    """Re-enqueuing a document (e.g. a modified file re-scanned) must clear its
+    cached terminal result. get_status() and wait_for() consult self.completed
+    first, so a stale entry would keep reporting the previous run's
+    completed/failed result while the document is actually re-queued."""
+
+    @pytest.mark.asyncio
+    async def test_enqueue_clears_stale_completed_status(
+        self, store: DocumentStore, sample_file: Path
+    ) -> None:
+        doc = store.register(sample_file, compute_file_hash(sample_file))
+        processor = DocumentProcessor(store, max_workers=0)
+
+        # Simulate a prior completed run cached in memory.
+        now = datetime.now(UTC)
+        processor.completed[doc.id] = ProcessingResult(
+            document_id=doc.id,
+            status=ProcessingStatus.COMPLETED,
+            started_at=now,
+            completed_at=now,
+        )
+
+        # Re-enqueue the document (its file changed and was re-scanned).
+        await processor.enqueue(doc.id, sample_file)
+
+        # The stale terminal result is gone; status reflects the new queued run.
+        assert doc.id not in processor.completed
+        status = processor.get_status(doc.id)
+        assert status["status"] == ProcessingStatus.QUEUED.value
