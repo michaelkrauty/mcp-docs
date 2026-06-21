@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.34] - 2026-06-20
+
+### Fixed
+
+- **`get_processing_status` and `wait_for_document` no longer report a stale result after a document is re-queued.** The processor caches each document's terminal result in memory, and both status calls consult that cache first. Re-enqueuing a document (for example a modified file picked up by a rescan) reset its database status to queued but never cleared the cached result, so until the worker finished re-processing, `get_processing_status` kept returning the previous run's `completed`/`failed` status (with the old timestamp) and `wait_for_document` returned the previous `ProcessingResult` immediately instead of waiting. Enqueuing now drops the cached terminal result (and any stale cancellation) so both calls reflect the new run.
+
 ## [1.1.33] - 2026-06-20
 
 ### Fixed

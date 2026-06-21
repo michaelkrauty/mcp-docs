@@ -446,6 +446,16 @@ class DocumentProcessor:
             extraction_status=ExtractionStatus.QUEUED,
         )
 
+        # This is a new processing run: drop any cached terminal result so
+        # get_status()/wait_for() (which consult self.completed first) do not keep
+        # reporting the previous run's completed/failed result once the document
+        # is re-queued. (A re-enqueue while the previous task is still mid-flight
+        # is a deeper race that also touches the DB status and is not addressed
+        # here.) The cancellation marker is deliberately left untouched: it is the
+        # only thing that makes the worker skip an old, still-queued cancelled
+        # task for this document.
+        self.completed.pop(document_id, None)
+
         try:
             # Wait up to timeout for queue space
             await asyncio.wait_for(self.queue.put(task), timeout=timeout)
