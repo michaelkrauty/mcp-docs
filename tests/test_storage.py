@@ -670,3 +670,90 @@ class TestIterAll:
 
         with pytest.raises(sqlite3.OperationalError):
             list(store.iter_all())
+
+    def _set_indexed_at(self, store: DocumentStore, doc_id: UUID, ts: str) -> None:
+        conn = store._get_conn()
+        conn.execute(
+            "UPDATE documents SET indexed_at = ? WHERE id = ?", (ts, str(doc_id))
+        )
+        conn.commit()
+
+    def test_multi_status_collection_yields_union(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        """A collection of statuses yields exactly the union of documents in
+        those states, and nothing in other states.
+
+        This underpins force-reindex: index_all(force=True) widens the work set
+        to {EXTRACTED, INDEXED} so an all-INDEXED corpus is still rebuilt."""
+        extracted = set(self._make_extracted(store, temp_dir, 3))
+
+        indexed = set()
+        for i in range(2):
+            f = temp_dir / f"indexed_{i}.txt"
+            f.write_text(f"indexed {i}")
+            doc = store.register(f)
+            store.update(doc.id, extraction_status=ExtractionStatus.INDEXED)
+            indexed.add(doc.id)
+
+        # One QUEUED document that must NOT appear in the union.
+        f = temp_dir / "queued.txt"
+        f.write_text("queued")
+        store.register(f)
+
+        seen = {
+            d.id
+            for d in store.iter_all(
+                extraction_status={
+                    ExtractionStatus.EXTRACTED,
+                    ExtractionStatus.INDEXED,
+                }
+            )
+        }
+
+        assert seen == extracted | indexed
+
+    def test_multi_status_preserves_order(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        """The multi-status path keeps ORDER BY indexed_at DESC and excludes
+        documents whose status is outside the requested collection."""
+        ids: list[UUID] = []
+        for i in range(4):
+            f = temp_dir / f"order_{i}.txt"
+            f.write_text(f"order {i}")
+            ids.append(store.register(f).id)
+        a, b, c, d = ids
+
+        store.update(a, extraction_status=ExtractionStatus.INDEXED)
+        store.update(b, extraction_status=ExtractionStatus.EXTRACTED)
+        store.update(c, extraction_status=ExtractionStatus.INDEXED)
+        store.update(d, extraction_status=ExtractionStatus.QUEUED)  # excluded
+
+        # Distinct timestamps set after the status updates (which also touch
+        # indexed_at), so DESC ordering is deterministic.
+        self._set_indexed_at(store, a, "2020-01-03T00:00:00+00:00")
+        self._set_indexed_at(store, b, "2020-01-02T00:00:00+00:00")
+        self._set_indexed_at(store, c, "2020-01-01T00:00:00+00:00")
+        self._set_indexed_at(store, d, "2020-01-04T00:00:00+00:00")
+
+        seen = [
+            doc.id
+            for doc in store.iter_all(
+                extraction_status=[
+                    ExtractionStatus.EXTRACTED,
+                    ExtractionStatus.INDEXED,
+                ]
+            )
+        ]
+
+        assert seen == [a, b, c]  # d (QUEUED, newest) excluded
+
+    def test_empty_status_collection_yields_nothing(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        """An empty status collection selects no documents (rather than raising
+        on an invalid ``IN ()`` clause)."""
+        self._make_extracted(store, temp_dir, 3)
+
+        assert list(store.iter_all(extraction_status=set())) == []

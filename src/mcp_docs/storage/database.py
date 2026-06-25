@@ -2,7 +2,7 @@
 
 import logging
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -774,7 +774,10 @@ class DocumentStore(ThreadSafeSQLiteStore):
         return cursor.fetchone()[0]
 
     def iter_all(
-        self, extraction_status: ExtractionStatus | None = None
+        self,
+        extraction_status: ExtractionStatus
+        | Collection[ExtractionStatus]
+        | None = None,
     ) -> Iterator[Document]:
         """
         Iterate over every document, optionally filtered by extraction status.
@@ -783,6 +786,11 @@ class DocumentStore(ThreadSafeSQLiteStore):
         limit), this yields the entire matching corpus, so callers that must
         process all documents (index_all in particular) are never silently
         capped.
+
+        ``extraction_status`` accepts a single status, a collection of statuses
+        (matched as a SQL ``IN`` set, e.g. force-reindex enumerating both
+        EXTRACTED and INDEXED documents), or None for the whole corpus. An empty
+        collection matches nothing.
 
         The id list is snapshotted up front and each document is read lazily.
         A document that cannot be loaded (deleted by another writer between the
@@ -793,20 +801,32 @@ class DocumentStore(ThreadSafeSQLiteStore):
         as an empty corpus.
 
         Args:
-            extraction_status: If given, only yield documents in this state.
+            extraction_status: If given, only yield documents in this state (or,
+                for a collection, any of these states).
 
         Yields:
             Document for each readable document.
         """
         conn = self._get_conn()
-        if extraction_status is not None:
+        if extraction_status is None:
+            cursor = conn.execute("SELECT id FROM documents ORDER BY indexed_at DESC")
+        elif isinstance(extraction_status, ExtractionStatus):
             cursor = conn.execute(
                 "SELECT id FROM documents WHERE extraction_status = ? "
                 "ORDER BY indexed_at DESC",
                 (extraction_status.value,),
             )
         else:
-            cursor = conn.execute("SELECT id FROM documents ORDER BY indexed_at DESC")
+            statuses = list(extraction_status)
+            if not statuses:
+                # Empty collection matches nothing; ``IN ()`` is invalid SQL.
+                return
+            placeholders = ", ".join("?" for _ in statuses)
+            cursor = conn.execute(
+                f"SELECT id FROM documents WHERE extraction_status IN ({placeholders}) "
+                "ORDER BY indexed_at DESC",
+                tuple(status.value for status in statuses),
+            )
 
         for row in cursor.fetchall():
             try:

@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.40] - 2026-06-25
+
+### Fixed
+
+- **`index_all(force=True)` now rebuilds an already-indexed corpus instead of silently doing nothing.** The work set was built from `iter_all(extraction_status=EXTRACTED)` before the `force` check, and `force` only bypassed the per-document hash filter, not the status selection. In steady state the worker auto-indexes every document to INDEXED, so no document is left EXTRACTED, the work set was empty, and `index_all(force=True)` returned `indexed: 0` without touching Qdrant, defeating the documented bulk-repair path used after a Qdrant wipe or an embedding/chunking parameter change. A force run now widens the selection to both EXTRACTED and INDEXED documents and re-extracts, re-embeds, and re-upserts each one (existing points are deleted before the rebuilt points are written). Incremental runs (`force=False`) are unchanged: they still enumerate only EXTRACTED documents and skip unchanged ones via the hash filter. `DocumentStore.iter_all` now also accepts a collection of statuses, matched as a SQL `IN` set.
+
 ## [1.1.39] - 2026-06-20
 
 ### Fixed

@@ -172,16 +172,29 @@ class DocumentIndexer:
         await self._ensure_components()
         await self.ensure_collection()
 
-        # Index the entire extracted corpus. iter_all() streams every extracted
-        # document; query()/list_summaries() default to a 50-row limit and would
-        # silently truncate a larger backlog.
-        docs_to_index = list(
-            self.document_store.iter_all(extraction_status=ExtractionStatus.EXTRACTED)
+        # Index the entire corpus. iter_all() streams every matching document;
+        # query()/list_summaries() default to a 50-row limit and would silently
+        # truncate a larger backlog.
+        #
+        # A force rebuild must reindex everything, including documents already in
+        # the INDEXED state. That is the production steady state: the worker sets
+        # EXTRACTED then auto-indexes to INDEXED, so in steady state no document
+        # is left EXTRACTED. iter_all() filters strictly by status, so force must
+        # widen the selection to both EXTRACTED and INDEXED; otherwise the work
+        # set is empty and the documented bulk-repair path silently no-ops.
+        # Incremental (force=False) stays EXTRACTED-only and leans on the per-doc
+        # hash filter below to skip unchanged docs without re-extracting the
+        # already-indexed corpus.
+        selection: ExtractionStatus | set[ExtractionStatus] = (
+            {ExtractionStatus.EXTRACTED, ExtractionStatus.INDEXED}
+            if force
+            else ExtractionStatus.EXTRACTED
         )
+        docs_to_index = list(self.document_store.iter_all(extraction_status=selection))
 
         if not docs_to_index:
             logger.info("No documents to index")
-            return {"indexed": 0, "total": 0}
+            return {"indexed": 0, "total": self.document_store.count()}
 
         # Filter for incremental updates
         if not force:
@@ -194,7 +207,7 @@ class DocumentIndexer:
 
         if not docs_to_index:
             logger.info("All documents already indexed")
-            return {"indexed": 0, "total": len(indexed_hashes) if not force else 0, "skipped": True}
+            return {"indexed": 0, "total": self.document_store.count(), "skipped": True}
 
         logger.info(f"Indexing {len(docs_to_index)} documents")
 
