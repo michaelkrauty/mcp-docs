@@ -358,16 +358,37 @@ class TestDocumentIndexerTagSync:
 
 
 class TestIndexAllCompleteCorpus:
-    """index_all must index every extracted document, not just the 50 most
+    """index_all must index every matching document, not just the 50 most
     recent. Regression for the silent 50-document cap: index_all enumerated via
-    the 50-capped query() instead of the unbounded iter_all()."""
+    the 50-capped query() instead of the unbounded iter_all().
+
+    These two tests also pin the status selection passed to iter_all: an
+    incremental run enumerates only EXTRACTED documents, while a force run
+    widens the selection to {EXTRACTED, INDEXED} so an already-indexed corpus
+    is still enumerated for rebuild."""
+
+    @staticmethod
+    def _absent_docs(n: int) -> list:
+        from unittest.mock import MagicMock
+
+        # Documents whose files are absent: each fails Pass-1 extraction, so
+        # index_all returns early with one error per enumerated document and
+        # never needs a real embedder or Qdrant. The error count therefore
+        # equals how many documents were enumerated.
+        return [
+            MagicMock(
+                path=f"/nonexistent/iter_doc_{i}.txt",
+                filename=f"iter_doc_{i}.txt",
+            )
+            for i in range(n)
+        ]
 
     @pytest.mark.asyncio
-    async def test_index_all_enumerates_entire_extracted_corpus(
+    async def test_index_all_enumerates_extracted_corpus_incremental(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """All extracted documents are enumerated via iter_all(); the capped
-        query() is not used."""
+        """An incremental run enumerates EXTRACTED documents via iter_all();
+        the capped query() is not used."""
         from unittest.mock import AsyncMock, MagicMock
 
         from mcp_docs.indexing.indexer import DocumentIndexer
@@ -375,17 +396,7 @@ class TestIndexAllCompleteCorpus:
         from mcp_docs.storage.database import DocumentStore
 
         n = 60
-        # Documents whose files are absent: each fails Pass-1 extraction, so
-        # index_all returns early with one error per enumerated document and
-        # never needs a real embedder or Qdrant. The error count therefore
-        # equals how many documents were enumerated.
-        docs = [
-            MagicMock(
-                path=f"/nonexistent/iter_doc_{i}.txt",
-                filename=f"iter_doc_{i}.txt",
-            )
-            for i in range(n)
-        ]
+        docs = self._absent_docs(n)
 
         mock_store = MagicMock(spec=DocumentStore)
         mock_store.iter_all.return_value = iter(docs)
@@ -398,8 +409,11 @@ class TestIndexAllCompleteCorpus:
         )
         monkeypatch.setattr(indexer, "_ensure_components", AsyncMock())
         monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
+        # No already-indexed hashes, so every enumerated doc survives the
+        # incremental filter and reaches Pass-1.
+        monkeypatch.setattr(indexer, "_get_indexed_hashes", AsyncMock(return_value=set()))
 
-        result = await indexer.index_all(force=True)
+        result = await indexer.index_all(force=False)
 
         mock_store.iter_all.assert_called_once_with(
             extraction_status=ExtractionStatus.EXTRACTED
@@ -407,6 +421,185 @@ class TestIndexAllCompleteCorpus:
         mock_store.query.assert_not_called()
         # One "file not found" error per enumerated document: all 60, not 50.
         assert len(result["errors"]) == n
+
+    @pytest.mark.asyncio
+    async def test_index_all_enumerates_entire_corpus_force(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A force run widens the selection to {EXTRACTED, INDEXED} so an
+        already-indexed corpus is enumerated for rebuild (not silently empty)."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from mcp_docs.indexing.indexer import DocumentIndexer
+        from mcp_docs.models import ExtractionStatus
+        from mcp_docs.storage.database import DocumentStore
+
+        n = 60
+        docs = self._absent_docs(n)
+
+        mock_store = MagicMock(spec=DocumentStore)
+        mock_store.iter_all.return_value = iter(docs)
+        mock_store.query.return_value = list(docs[:50])
+        mock_store.count.return_value = n
+
+        indexer = DocumentIndexer(
+            document_store=mock_store, collection_name="test_collection"
+        )
+        monkeypatch.setattr(indexer, "_ensure_components", AsyncMock())
+        monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
+
+        result = await indexer.index_all(force=True)
+
+        mock_store.iter_all.assert_called_once_with(
+            extraction_status={ExtractionStatus.EXTRACTED, ExtractionStatus.INDEXED}
+        )
+        mock_store.query.assert_not_called()
+        # One "file not found" error per enumerated document: all 60, not 50.
+        assert len(result["errors"]) == n
+
+
+class TestIndexAllForceRebuild:
+    """index_all(force=True) must rebuild the entire corpus even when every
+    document is already in the INDEXED state (the production steady state).
+
+    Regression: iter_all filtered strictly on EXTRACTED, so on a healthy
+    all-INDEXED corpus the work set was empty and force=True silently no-opped
+    (returned indexed:0/total:0 without touching Qdrant), defeating the
+    documented bulk-repair path."""
+
+    @staticmethod
+    def _register(store, path, status):
+        doc = store.register(path)
+        store.update(doc.id, extraction_status=status)
+        return doc
+
+    @pytest.mark.asyncio
+    async def test_force_rebuilds_all_indexed_corpus(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every INDEXED document is enumerated and rebuilt: per-doc points are
+        deleted before re-upsert, and the result reports indexed:N/total:N."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from mcp_docs.indexing.indexer import DocumentIndexer
+        from mcp_docs.models import ExtractionStatus
+        from mcp_docs.storage.database import DocumentStore
+
+        n = 3
+        store = DocumentStore(db_path=tmp_path / "force.db")
+        try:
+            for i in range(n):
+                f = tmp_path / f"doc_{i}.txt"
+                f.write_text(f"content {i}")
+                self._register(store, f, ExtractionStatus.INDEXED)
+
+            # Record delete/upsert ordering to prove existing points are
+            # replaced (delete) before the rebuilt point is written (upsert).
+            call_order: list[str] = []
+
+            async def record_delete(_doc_id) -> None:
+                call_order.append("delete")
+
+            async def record_upsert(_collection, _points) -> None:
+                call_order.append("upsert")
+
+            fake_storage = MagicMock()
+            fake_storage.upsert_batch = AsyncMock(side_effect=record_upsert)
+            fake_vocab = MagicMock()
+            fake_vocab.tokenize.return_value = ["tok"]
+
+            indexer = DocumentIndexer(
+                document_store=store,
+                storage=fake_storage,
+                embedder=MagicMock(),
+                global_vocab=fake_vocab,
+                collection_name="test",
+            )
+            monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
+            monkeypatch.setattr(
+                indexer, "_delete_document_points", AsyncMock(side_effect=record_delete)
+            )
+            monkeypatch.setattr(
+                indexer, "_create_document_points", AsyncMock(return_value=["POINT"])
+            )
+
+            result = await indexer.index_all(force=True)
+
+            assert result["indexed"] == n
+            assert result["total"] == n
+            # Each document: delete its points, then upsert the rebuilt point.
+            assert call_order == ["delete", "upsert"] * n
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_incremental_skips_indexed_and_does_not_reextract(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """force=False keeps EXTRACTED-only selection: already-INDEXED documents
+        are not re-extracted, only the EXTRACTED ones are (re)indexed."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        import mcp_docs.indexing.indexer as indexer_mod
+        from mcp_docs.indexing.indexer import DocumentIndexer
+        from mcp_docs.models import ExtractionStatus
+        from mcp_docs.storage.database import DocumentStore
+
+        store = DocumentStore(db_path=tmp_path / "incremental.db")
+        try:
+            extracted_doc_paths: set[str] = set()
+            for i in range(2):
+                f = tmp_path / f"extracted_{i}.txt"
+                f.write_text(f"extracted {i}")
+                doc = self._register(store, f, ExtractionStatus.EXTRACTED)
+                extracted_doc_paths.add(doc.path)
+
+            indexed_doc_paths: set[str] = set()
+            for i in range(2):
+                f = tmp_path / f"indexed_{i}.txt"
+                f.write_text(f"indexed {i}")
+                doc = self._register(store, f, ExtractionStatus.INDEXED)
+                indexed_doc_paths.add(doc.path)
+
+            # Spy on extraction to prove which documents are re-extracted.
+            real_extract = indexer_mod.extract_content
+            seen_paths: list[str] = []
+
+            def spy_extract(path, doc_type):
+                seen_paths.append(str(path))
+                return real_extract(path, doc_type)
+
+            monkeypatch.setattr(indexer_mod, "extract_content", spy_extract)
+
+            fake_storage = MagicMock()
+            fake_storage.upsert_batch = AsyncMock()
+            fake_vocab = MagicMock()
+            fake_vocab.tokenize.return_value = ["tok"]
+
+            indexer = DocumentIndexer(
+                document_store=store,
+                storage=fake_storage,
+                embedder=MagicMock(),
+                global_vocab=fake_vocab,
+                collection_name="test",
+            )
+            monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
+            monkeypatch.setattr(indexer, "_delete_document_points", AsyncMock())
+            monkeypatch.setattr(
+                indexer, "_create_document_points", AsyncMock(return_value=["POINT"])
+            )
+            # No already-indexed hashes, so EXTRACTED docs survive the filter.
+            monkeypatch.setattr(
+                indexer, "_get_indexed_hashes", AsyncMock(return_value=set())
+            )
+
+            result = await indexer.index_all(force=False)
+
+            assert result["indexed"] == 2  # only the EXTRACTED documents
+            # The INDEXED documents were never re-extracted.
+            assert set(seen_paths) == extracted_doc_paths
+        finally:
+            store.close()
 
 
 class TestDocumentIndexerEmptyContent:
