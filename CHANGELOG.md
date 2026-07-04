@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.43] - 2026-07-04
+
+### Fixed
+
+- **A CSV with a field larger than 128 KB now extracts instead of failing.** `csv.reader` rejects any single field larger than `csv.field_size_limit()` (131072 bytes by default) with `csv.Error`, which `extract_csv` surfaced as an `ExtractionError`, so a CSV containing one large cell (an embedded JSON blob, a long free-text note, a base64 value) failed to extract entirely even though every other row was fine. The whole file is already read into memory before parsing, so `_csv_to_markdown_table` now raises csv's process-wide `field_size_limit` to the input length (bounded by the platform C long, and by the upstream file-size limits) before reading.
+
 ## [1.1.42] - 2026-07-04
 
 ### Fixed
