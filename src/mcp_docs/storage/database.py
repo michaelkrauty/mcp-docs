@@ -43,6 +43,13 @@ class DocumentStore(ThreadSafeSQLiteStore):
     - document_roots: Scanned root directories
     """
 
+    # Column list shared by list_summaries and iter_summaries so both build
+    # DocumentSummary from the same row shape (see _row_to_summary).
+    _SUMMARY_COLUMNS = (
+        "id, path, content_hash, filename, doc_type, title, "
+        "size_bytes, status, extraction_status, indexed_at"
+    )
+
     def __init__(self, db_path: Path | None = None):
         """
         Initialize document store.
@@ -534,11 +541,7 @@ class DocumentStore(ThreadSafeSQLiteStore):
         """
         conn = self._get_conn()
 
-        query = """
-            SELECT id, path, content_hash, filename, doc_type, title,
-                   size_bytes, status, extraction_status, indexed_at
-            FROM documents WHERE 1=1
-        """
+        query = f"SELECT {self._SUMMARY_COLUMNS} FROM documents WHERE 1=1"
         params: list[Any] = []
 
         if doc_type:
@@ -571,29 +574,113 @@ class DocumentStore(ThreadSafeSQLiteStore):
         params.append(limit)
 
         cursor = conn.execute(query, params)
-        summaries = []
+        return [self._row_to_summary(conn, row) for row in cursor.fetchall()]
 
+    def _row_to_summary(
+        self, conn: sqlite3.Connection, row: tuple
+    ) -> DocumentSummary:
+        """Build a DocumentSummary from a row selected with _SUMMARY_COLUMNS.
+
+        Shared by list_summaries and iter_summaries so the two can never drift
+        in column order or field mapping.
+        """
+        doc_id = UUID(row[0])
+        return DocumentSummary(
+            id=doc_id,
+            path=row[1],
+            content_hash=row[2],
+            filename=row[3],
+            doc_type=DocumentType(row[4]),
+            title=row[5],
+            size_bytes=row[6],
+            tags=self._get_tags(conn, doc_id),
+            status=DocumentStatus(row[7]),
+            extraction_status=ExtractionStatus(row[8]),
+            indexed_at=datetime.fromisoformat(row[9]),
+        )
+
+    def _read_summary(self, document_id: UUID) -> DocumentSummary | None:
+        """Read one document as a lightweight summary, or None if the row is
+        gone (deleted between an id snapshot and this read).
+
+        The summary sibling of ``read``: it does not raise
+        DocumentNotFoundError, so iter_summaries can treat a vanished row as a
+        skip rather than an error.
+        """
+        conn = self._get_conn()
+        cursor = conn.execute(
+            f"SELECT {self._SUMMARY_COLUMNS} FROM documents WHERE id = ?",
+            (str(document_id),),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_summary(conn, row)
+
+    def iter_summaries(
+        self,
+        document_root: str | None = None,
+        status: DocumentStatus | None = None,
+    ) -> Iterator[DocumentSummary]:
+        """Iterate over matching documents as lightweight summaries, uncapped.
+
+        Unlike ``list_summaries`` (which takes a row ``limit``, default 50),
+        this yields the entire matching set, so callers that must reconcile
+        every registered document under a root -- scan_root's deletion pass and
+        remove_document_root -- are never silently capped below the scanner's
+        MAX_FILES_PER_ROOT operating range.
+
+        Mirrors ``iter_all``'s streaming/error discipline: the id list is
+        snapshotted up front and each summary is read lazily. A row that
+        vanished between the snapshot and its read is skipped; a malformed
+        stored row is skipped with a warning; a systemic ``sqlite3.Error`` (e.g.
+        a locked database) propagates rather than masquerading as an empty
+        baseline (which would let the scanner delete live documents).
+
+        Args:
+            document_root: If given, only yield documents under this root.
+            status: If given, only yield documents in this status.
+
+        Yields:
+            DocumentSummary for each readable matching document.
+        """
+        conn = self._get_conn()
+        query = "SELECT id FROM documents WHERE 1=1"
+        params: list[Any] = []
+        if document_root:
+            query += " AND document_root = ?"
+            params.append(document_root)
+        if status:
+            query += " AND status = ?"
+            params.append(status.value)
+        query += " ORDER BY indexed_at DESC"
+
+        cursor = conn.execute(query, params)
         for row in cursor.fetchall():
-            doc_id = UUID(row[0])
-            tags = self._get_tags(conn, doc_id)
-
-            summaries.append(
-                DocumentSummary(
-                    id=doc_id,
-                    path=row[1],
-                    content_hash=row[2],
-                    filename=row[3],
-                    doc_type=DocumentType(row[4]),
-                    title=row[5],
-                    size_bytes=row[6],
-                    tags=tags,
-                    status=DocumentStatus(row[7]),
-                    extraction_status=ExtractionStatus(row[8]),
-                    indexed_at=datetime.fromisoformat(row[9]),
+            doc_id_str = row[0]
+            try:
+                summary = self._read_summary(UUID(doc_id_str))
+            except sqlite3.Error:
+                # Systemic DB failure (e.g. database is locked). Must NOT be
+                # swallowed as one bad row: an empty baseline would let the
+                # scanner delete every live document. Fail loud.
+                raise
+            except (ValueError, KeyError, TypeError):
+                # Malformed stored row (bad uuid/enum/date). Skip just this one.
+                logger.warning(
+                    "Skipping unreadable document %s during iter_summaries",
+                    doc_id_str,
+                    exc_info=True,
                 )
-            )
-
-        return summaries
+                continue
+            if summary is None:
+                # Deleted between the id snapshot and this read; skip it.
+                logger.debug(
+                    "Document %s vanished during iter_summaries, skipping",
+                    doc_id_str,
+                )
+                continue
+            yield summary
 
     def _row_to_document(self, row: tuple, conn: sqlite3.Connection) -> Document:
         """Convert database row to Document."""

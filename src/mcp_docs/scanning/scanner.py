@@ -167,12 +167,15 @@ class DocumentScanner:
             result.errors.append(f"Root path is not a directory: {root.path}")
             return result
 
-        # Get existing documents in this root
+        # Get existing documents in this root. Enumerate via the uncapped
+        # iter_summaries: list_summaries takes a row limit, so a root holding
+        # more registered documents than that limit would leave the surplus out
+        # of the reconciliation baseline, and genuinely-deleted files beyond it
+        # would never be marked DELETED / purged from the index. The walk covers
+        # up to MAX_FILES_PER_ROOT, so the baseline must too.
         existing_docs = {
             doc.path: doc
-            for doc in self.document_store.list_summaries(
-                document_root=root.path, limit=10000
-            )
+            for doc in self.document_store.iter_summaries(document_root=root.path)
         }
 
         # Track which paths we've seen

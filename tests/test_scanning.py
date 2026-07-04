@@ -193,6 +193,45 @@ class TestDocumentScanner:
         assert file1_doc.id not in enqueued
 
     @pytest.mark.asyncio
+    async def test_scan_root_reconciles_deletion_beyond_summary_window(
+        self,
+        store: DocumentStore,
+        document_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A deleted file whose registry row falls outside a capped
+        list_summaries window is still reconciled, because scan_root builds its
+        baseline from the uncapped iter_summaries. Pre-fix the baseline was
+        list_summaries(limit=10000), so a genuinely-deleted file beyond that
+        window was never marked DELETED / purged from the index."""
+        scanner = DocumentScanner(store, recursive=True)
+        root = store.add_root(str(document_root))
+        await scanner.scan_root(root)
+
+        # Simulate the pre-fix cap at test scale: list_summaries drops one
+        # registered document (file1.txt) from every result, standing in for a
+        # doc pushed past the 10000-row limit at scale. iter_summaries is not
+        # capped, so the fixed scanner is unaffected by this patch.
+        real_list = store.list_summaries
+
+        def capped(*args: object, **kwargs: object) -> list:
+            return [
+                s
+                for s in real_list(*args, **kwargs)  # type: ignore[arg-type]
+                if not s.path.endswith("file1.txt")
+            ]
+
+        monkeypatch.setattr(store, "list_summaries", capped)
+
+        # Delete the file the cap would drop.
+        (document_root / "file1.txt").unlink()
+        result = await scanner.scan_root(root)
+
+        # The deletion is reconciled because the baseline came from the
+        # uncapped iter_summaries, not the (patched) capped list_summaries.
+        assert result.files_deleted == 1
+
+    @pytest.mark.asyncio
     async def test_scan_root_detects_deletions(
         self, store: DocumentStore, document_root: Path
     ) -> None:
