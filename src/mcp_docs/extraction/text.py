@@ -77,6 +77,23 @@ def _read_text_with_encoding_fallback(path: Path) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def _widen_csv_field_limit(needed: int) -> None:
+    """Raise csv's process-wide field_size_limit to at least ``needed``.
+
+    ``csv.reader`` rejects a single field larger than ``field_size_limit`` (128
+    KB by default) with ``csv.Error``. A CSV cell can legitimately be much
+    larger (an embedded JSON blob, a long free-text field), so allow up to the
+    length of the already-in-memory input. The requested value is halved on
+    ``OverflowError`` so it stays within the platform C long. Idempotent and
+    cheap: a no-op when the current limit already suffices.
+    """
+    while needed > csv.field_size_limit():
+        try:
+            csv.field_size_limit(needed)
+        except OverflowError:
+            needed //= 2
+
+
 def _csv_to_markdown_table(raw: str) -> str:
     """Render CSV text as a GitHub-flavored markdown table.
 
@@ -84,6 +101,10 @@ def _csv_to_markdown_table(raw: str) -> str:
     newlines parse correctly. Ragged rows are padded to the widest row; pipes
     are escaped and embedded newlines flattened so each record stays one row.
     """
+    # A CSV field can be larger than csv.reader's default 128 KB field cap; the
+    # whole input is already in memory, so allow a field up to its length rather
+    # than crashing on it (upstream file-size limits bound `raw`).
+    _widen_csv_field_limit(len(raw))
     # newline="" lets the csv module handle CR/LF/CR-only record separators and
     # newlines embedded in quoted fields, instead of StringIO pre-translating
     # them (CR-only input otherwise raises "new-line character seen in
