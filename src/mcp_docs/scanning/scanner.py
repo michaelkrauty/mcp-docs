@@ -10,7 +10,7 @@ from pathlib import Path
 from uuid import UUID
 
 from mcp_docs.extraction import ContentExtractor
-from mcp_docs.models import DocumentRoot, DocumentStatus
+from mcp_docs.models import DocumentRoot, DocumentStatus, ExtractionStatus
 from mcp_docs.storage.database import DocumentStore, compute_file_hash
 
 logger = logging.getLogger(__name__)
@@ -311,11 +311,26 @@ class DocumentScanner:
                                 if enqueue_callback:
                                     await enqueue_callback(existing.id, file_path)
                         elif existing_full and existing_full.status != DocumentStatus.ACTIVE:
-                            # File unchanged but was marked deleted/etc - restore to active
+                            # File unchanged on disk but the document was marked
+                            # non-active, typically DELETED by an earlier scan
+                            # whose deletion pass also purged its vector points
+                            # via delete_callback. Restoring status alone would
+                            # leave it ACTIVE while extraction_status stayed
+                            # INDEXED, so the document would look indexed but have
+                            # no vectors: silently unsearchable until a manual
+                            # force reindex. Reset it to QUEUED and re-enqueue so
+                            # it is re-extracted and re-indexed, rebuilding its
+                            # vectors. If no enqueue_callback is wired, the QUEUED
+                            # status lets startup recovery pick it up.
                             self.document_store.update(
                                 existing.id,
                                 status=DocumentStatus.ACTIVE,
+                                extraction_status=ExtractionStatus.QUEUED,
                             )
+                            result.files_modified += 1
+
+                            if enqueue_callback:
+                                await enqueue_callback(existing.id, file_path)
                     else:
                         # New file (not in existing_docs for this root)
                         # Check if same content exists elsewhere in DB
