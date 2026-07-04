@@ -527,6 +527,18 @@ class TestCsvExtraction:
         assert "| Alice | 30 |" in content.text
         assert content.word_count > 0
 
+    def test_large_field_over_default_limit(self, temp_dir: Path) -> None:
+        """A CSV field larger than csv's default 128 KB field limit is extracted
+        instead of crashing with csv.Error."""
+        big = "x" * 200_000  # well past the 131072-byte default field cap
+        f = temp_dir / "big.csv"
+        f.write_text(f'name,blob\nrow1,"{big}"\n', encoding="utf-8")
+
+        content = extract_csv(f)
+
+        assert big in content.text  # the large field survived, no crash
+        assert content.word_count > 0
+
     def test_latin1_extracts(self, temp_dir: Path) -> None:
         """The exact previously-failing case: accented names in a latin-1 export."""
         f = temp_dir / "latin1.csv"
