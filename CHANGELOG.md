@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.41] - 2026-07-04
+
+### Fixed
+
+- **Scan reconciliation no longer caps its baseline at 10000 documents.** `scan_root` built its set of already-registered documents from `list_summaries(document_root=..., limit=10000)` while the directory walk covers up to `MAX_FILES_PER_ROOT` (100000). A root holding more registered documents than the limit left the surplus out of the reconciliation baseline, so files that were genuinely deleted on disk beyond that window were never marked `DELETED` or purged from the vector index, and could be re-registered on each scan. `remove_document_root(delete_documents=True)` shared the same 10000-row cap, orphaning registry rows, vector points, and fact sources for documents past it. Both call sites now enumerate via the new uncapped `DocumentStore.iter_summaries()`. This is latent on the current document roots (all well under 10000 files) and preventive for larger roots within the scanner's advertised operating range.
+- `DocumentStore.iter_summaries()` mirrors `iter_all`'s streaming and error discipline: the id list is snapshotted up front and each summary is read lazily, a row that vanished between the snapshot and its read is skipped, a malformed row is skipped with a warning, and a systemic `sqlite3.Error` propagates rather than masquerading as an empty baseline (which would let the deletion pass remove live documents). The row-to-summary mapping is now shared by `list_summaries` and `iter_summaries`.
+
 ## [1.1.40] - 2026-06-25
 
 ### Fixed
