@@ -7,7 +7,7 @@ from uuid import UUID
 
 import pytest
 
-from mcp_docs.models import DocumentStatus
+from mcp_docs.models import DocumentStatus, ExtractionStatus
 from mcp_docs.scanning import DocumentScanner, ScanResult
 from mcp_docs.storage.database import DocumentStore
 
@@ -249,6 +249,98 @@ class TestDocumentScanner:
         result = await scanner.scan_root(root)
 
         assert result.files_deleted == 1
+
+    @pytest.mark.asyncio
+    async def test_scan_root_reindexes_restored_deleted_document(
+        self, store: DocumentStore, document_root: Path
+    ) -> None:
+        """A file deleted (soft-deleted, its vectors purged by the deletion
+        pass) then restored on disk is reset to QUEUED and re-enqueued, not left
+        ACTIVE + INDEXED with no vectors (silently unsearchable)."""
+        scanner = DocumentScanner(store, recursive=True)
+        root = store.add_root(str(document_root))
+        await scanner.scan_root(root)
+
+        # Simulate the document having been fully indexed.
+        doc_id = next(
+            s.id
+            for s in store.list_summaries(
+                document_root=str(document_root), limit=100
+            )
+            if s.filename == "file1.txt"
+        )
+        store.update(doc_id, extraction_status=ExtractionStatus.INDEXED)
+
+        # Delete the file: the deletion pass marks it DELETED and purges its
+        # vector points via delete_callback.
+        (document_root / "file1.txt").unlink()
+        purged: list[UUID] = []
+
+        async def delete_cb(did: UUID) -> None:
+            purged.append(did)
+
+        await scanner.scan_root(root, delete_callback=delete_cb)
+        assert store.read(doc_id).status == DocumentStatus.DELETED
+        assert doc_id in purged  # vectors were purged on deletion
+
+        # Restore the file with identical content.
+        (document_root / "file1.txt").write_text("This is file 1")
+        enqueued: list[UUID] = []
+
+        async def enqueue_cb(did: UUID, path: Path) -> None:
+            enqueued.append(did)
+
+        await scanner.scan_root(root, enqueue_callback=enqueue_cb)
+
+        restored = store.read(doc_id)
+        assert restored is not None
+        assert restored.status == DocumentStatus.ACTIVE
+        # Reset for re-indexing rather than left at the stale INDEXED state.
+        assert restored.extraction_status == ExtractionStatus.QUEUED
+        assert doc_id in enqueued
+
+    @pytest.mark.asyncio
+    async def test_scan_root_does_not_requeue_modified_document(
+        self, store: DocumentStore, document_root: Path
+    ) -> None:
+        """A MODIFIED document whose content already matches the stored hash (the
+        modification path already recorded and enqueued it) is normalized back to
+        ACTIVE without being re-queued, so periodic scans don't duplicate
+        extraction or clobber an in-flight processing state. Only the DELETED
+        case (whose vectors were purged) is re-enqueued."""
+        scanner = DocumentScanner(store, recursive=True)
+        root = store.add_root(str(document_root))
+        await scanner.scan_root(root)
+
+        doc_id = next(
+            s.id
+            for s in store.list_summaries(
+                document_root=str(document_root), limit=100
+            )
+            if s.filename == "file1.txt"
+        )
+        # State right after the modification path ran: status MODIFIED,
+        # extraction_status INDEXED, content_hash already == the on-disk file
+        # (so the next scan takes the unchanged-content restore branch).
+        store.update(
+            doc_id,
+            status=DocumentStatus.MODIFIED,
+            extraction_status=ExtractionStatus.INDEXED,
+        )
+
+        enqueued: list[UUID] = []
+
+        async def enqueue_cb(did: UUID, path: Path) -> None:
+            enqueued.append(did)
+
+        await scanner.scan_root(root, enqueue_callback=enqueue_cb)
+
+        doc = store.read(doc_id)
+        assert doc is not None
+        assert doc.status == DocumentStatus.ACTIVE  # normalized
+        # Not reset to QUEUED and not re-enqueued.
+        assert doc.extraction_status == ExtractionStatus.INDEXED
+        assert doc_id not in enqueued
 
     @pytest.mark.asyncio
     async def test_scan_root_skips_hidden_files(
