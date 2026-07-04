@@ -300,6 +300,49 @@ class TestDocumentScanner:
         assert doc_id in enqueued
 
     @pytest.mark.asyncio
+    async def test_scan_root_does_not_requeue_modified_document(
+        self, store: DocumentStore, document_root: Path
+    ) -> None:
+        """A MODIFIED document whose content already matches the stored hash (the
+        modification path already recorded and enqueued it) is normalized back to
+        ACTIVE without being re-queued, so periodic scans don't duplicate
+        extraction or clobber an in-flight processing state. Only the DELETED
+        case (whose vectors were purged) is re-enqueued."""
+        scanner = DocumentScanner(store, recursive=True)
+        root = store.add_root(str(document_root))
+        await scanner.scan_root(root)
+
+        doc_id = next(
+            s.id
+            for s in store.list_summaries(
+                document_root=str(document_root), limit=100
+            )
+            if s.filename == "file1.txt"
+        )
+        # State right after the modification path ran: status MODIFIED,
+        # extraction_status INDEXED, content_hash already == the on-disk file
+        # (so the next scan takes the unchanged-content restore branch).
+        store.update(
+            doc_id,
+            status=DocumentStatus.MODIFIED,
+            extraction_status=ExtractionStatus.INDEXED,
+        )
+
+        enqueued: list[UUID] = []
+
+        async def enqueue_cb(did: UUID, path: Path) -> None:
+            enqueued.append(did)
+
+        await scanner.scan_root(root, enqueue_callback=enqueue_cb)
+
+        doc = store.read(doc_id)
+        assert doc is not None
+        assert doc.status == DocumentStatus.ACTIVE  # normalized
+        # Not reset to QUEUED and not re-enqueued.
+        assert doc.extraction_status == ExtractionStatus.INDEXED
+        assert doc_id not in enqueued
+
+    @pytest.mark.asyncio
     async def test_scan_root_skips_hidden_files(
         self, store: DocumentStore, document_root: Path
     ) -> None:
