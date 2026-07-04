@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.42] - 2026-07-04
+
+### Fixed
+
+- **A document restored after deletion is re-indexed instead of left silently unsearchable.** When a registered, indexed document's file is deleted from disk, the scan deletion pass marks it `DELETED` and purges its vector points via `delete_callback`. If the file was later restored on disk with unchanged content, the scanner set its status back to `ACTIVE` but left `extraction_status` at the stale `INDEXED` value and never re-enqueued it, so the document ended up `ACTIVE` and `INDEXED` with no vectors in the index: it looked indexed but returned nothing from semantic or keyword search until a manual `index_all(force=True)`. Delete-then-restore is a common editor and VCS pattern (a checkout, a stash round trip, a move out and back). The restore branch now resets `extraction_status` to `QUEUED` and re-enqueues the document so it is re-extracted and re-indexed, rebuilding its vectors; if no enqueue callback is wired, the `QUEUED` status lets startup recovery pick it up. The restore is counted in `files_modified`.
+
 ## [1.1.41] - 2026-07-04
 
 ### Fixed
