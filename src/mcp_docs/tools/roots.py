@@ -166,7 +166,10 @@ async def remove_document_root(
     deleted_count = 0
     sources_marked = 0
     if delete_documents:
-        docs = store.list_summaries(document_root=str(root_path), limit=10000)
+        # iter_summaries is uncapped, so removing a root with a large number of
+        # registered documents deletes every one (registry row, vector points,
+        # fact sources) instead of orphaning the surplus beyond a row limit.
+        docs = store.iter_summaries(document_root=str(root_path))
         for doc in docs:
             sources_marked += await delete_document_artifacts(
                 store, doc.id, doc.content_hash

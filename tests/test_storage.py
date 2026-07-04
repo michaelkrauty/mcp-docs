@@ -757,3 +757,130 @@ class TestIterAll:
         self._make_extracted(store, temp_dir, 3)
 
         assert list(store.iter_all(extraction_status=set())) == []
+
+
+class TestIterSummaries:
+    """iter_summaries() yields the whole matching set (no row limit), filters
+    by document_root/status, and mirrors iter_all's resilience (skip vanished /
+    malformed rows, propagate systemic DB errors).
+
+    Underpins the scan reconciliation fix: scan_root's baseline was built from
+    list_summaries(limit=10000), so a root with more registered documents than
+    that left the surplus unreconciled (deletions beyond it never marked
+    DELETED / purged from the index).
+    """
+
+    def _register(
+        self,
+        store: DocumentStore,
+        directory: Path,
+        n: int,
+        root: str | None = None,
+        prefix: str = "sum",
+    ) -> list[UUID]:
+        ids: list[UUID] = []
+        for i in range(n):
+            f = directory / f"{prefix}_{i}.txt"
+            f.write_text(f"content {prefix} {i}")
+            ids.append(store.register(f, document_root=root).id)
+        return ids
+
+    def test_yields_more_than_default_list_summaries_limit(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        """iter_summaries returns the whole set, past list_summaries' 50 cap."""
+        self._register(store, temp_dir, 60)
+
+        assert len(list(store.iter_summaries())) == 60
+        # list_summaries silently caps at its default 50-row limit.
+        assert len(store.list_summaries(limit=50)) == 50
+
+    def test_filters_by_document_root(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        """Only documents under the requested root are yielded."""
+        root_a = temp_dir / "rootA"
+        root_a.mkdir()
+        root_b = temp_dir / "rootB"
+        root_b.mkdir()
+        self._register(store, root_a, 3, root=str(root_a), prefix="a")
+        self._register(store, root_b, 2, root=str(root_b), prefix="b")
+
+        seen = list(store.iter_summaries(document_root=str(root_a)))
+
+        assert len(seen) == 3
+        assert all(s.path.startswith(str(root_a)) for s in seen)
+
+    def test_filters_by_status(
+        self, store: DocumentStore, temp_dir: Path
+    ) -> None:
+        """The optional status filter restricts to that status."""
+        deleted_id, active_id = self._register(store, temp_dir, 2)
+        store.update(deleted_id, status=DocumentStatus.DELETED)
+
+        deleted = list(store.iter_summaries(status=DocumentStatus.DELETED))
+        active = list(store.iter_summaries(status=DocumentStatus.ACTIVE))
+
+        assert [s.id for s in deleted] == [deleted_id]
+        assert [s.id for s in active] == [active_id]
+
+    def test_skips_vanished_document(
+        self,
+        store: DocumentStore,
+        temp_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A row whose _read_summary returns None (deleted between the id
+        snapshot and its read) is skipped, not yielded as None."""
+        gone, kept = self._register(store, temp_dir, 2)
+        real = store._read_summary
+
+        def flaky(document_id: UUID):
+            return None if document_id == gone else real(document_id)
+
+        monkeypatch.setattr(store, "_read_summary", flaky)
+
+        seen = [s.id for s in store.iter_summaries()]
+
+        assert gone not in seen
+        assert seen == [kept]
+
+    def test_skips_unreadable_document(
+        self,
+        store: DocumentStore,
+        temp_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A malformed row (read raises ValueError) is skipped, not fatal."""
+        bad, good = self._register(store, temp_dir, 2)
+        real = store._read_summary
+
+        def flaky(document_id: UUID):
+            if document_id == bad:
+                raise ValueError("malformed stored row")
+            return real(document_id)
+
+        monkeypatch.setattr(store, "_read_summary", flaky)
+
+        seen = [s.id for s in store.iter_summaries()]
+
+        assert bad not in seen
+        assert seen == [good]
+
+    def test_propagates_systemic_db_error(
+        self,
+        store: DocumentStore,
+        temp_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A systemic DB failure propagates rather than being swallowed as one
+        bad row (an empty baseline would let the scanner delete live docs)."""
+        self._register(store, temp_dir, 1)
+
+        def locked(document_id: UUID):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(store, "_read_summary", locked)
+
+        with pytest.raises(sqlite3.OperationalError):
+            list(store.iter_summaries())
