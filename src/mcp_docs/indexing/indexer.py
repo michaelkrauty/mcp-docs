@@ -138,21 +138,16 @@ class DocumentIndexer:
             tokens = set(self.global_vocab.tokenize(content))
             self.global_vocab.register_codebase(DOCS_CODEBASE_ID, [tokens])
 
-        # Delete existing points
-        await self._delete_document_points(document_id)
-
-        # Index document
+        # Embedding can fail, so preserve the existing index until replacements are ready.
         points = await self._create_document_points(document, content)
+        await self._replace_document_points(document_id, points)
 
-        # Upsert to Qdrant
-        if points:
-            await self.storage.upsert_batch(self.collection_name, points)
-            # Update status to indexed
-            self.document_store.update(
-                document_id,
-                extraction_status=ExtractionStatus.INDEXED,
-            )
-            logger.info(f"Indexed document {document_id}: {len(points)} points")
+        # Update status to indexed
+        self.document_store.update(
+            document_id,
+            extraction_status=ExtractionStatus.INDEXED,
+        )
+        logger.info(f"Indexed document {document_id}: {len(points)} points")
 
         return len(points)
 
@@ -265,17 +260,13 @@ class DocumentIndexer:
             try:
                 content = doc_contents[doc.id]
 
-                # Delete any existing points for this document
-                await self._delete_document_points(doc.id)
-
                 # Create both summary AND chunk points (like index_document does)
                 points = await self._create_document_points(doc, content)
+                await self._replace_document_points(doc.id, points)
 
-                if points:
-                    await self.storage.upsert_batch(self.collection_name, points)
-                    total_points += len(points)
-                    indexed_count += 1
-                    logger.debug(f"Indexed {doc.filename}: {len(points)} points")
+                total_points += len(points)
+                indexed_count += 1
+                logger.debug(f"Indexed {doc.filename}: {len(points)} points")
 
                 # Update status to indexed
                 self.document_store.update(doc.id, extraction_status=ExtractionStatus.INDEXED)
@@ -450,6 +441,29 @@ class DocumentIndexer:
             )
         except Exception as e:
             logger.warning(f"Failed to delete document points: {e}")
+
+    async def _replace_document_points(
+        self,
+        document_id: UUID,
+        points: list[PointStruct],
+    ) -> None:
+        """Replace a document's points once the replacements are built.
+
+        Every successfully built document index contains a summary point, so an
+        empty result means construction failed and the old index is left alone.
+
+        A failed delete is logged and the upsert still runs. A remote delete has
+        an ambiguous outcome: Qdrant may have applied it and only lost the
+        response, in which case skipping the upsert would leave the document with
+        no points at all. Writing the replacements keeps it searchable either
+        way, at the cost of possibly stranding surplus chunk points from a
+        shrunken document, which is the lesser failure.
+        """
+        if not points:
+            raise RuntimeError(f"Point construction produced no points for document {document_id}")
+
+        await self._delete_document_points(document_id)
+        await self.storage.upsert_batch(self.collection_name, points)
 
     async def update_document_path_in_index(self, document_id: UUID, new_path: str) -> None:
         """

@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.44] - 2026-07-10
+
+### Fixed
+
+- **A failed document re-index no longer deletes the document's existing search points.** Both single-document and bulk re-indexing deleted the current summary and chunk points before the fallible embedding request, so an embedding failure made the document disappear from search until another re-index. Replacement points are now fully built before the existing points are deleted, then deletion and upsert run back to back so a reduced chunk count cannot leave stale chunks behind. If point construction fails or unexpectedly returns an empty list, the previous index remains intact and the failure is surfaced; an empty result is invalid because every successfully built document index contains at least its summary point.
+
 ## [1.1.43] - 2026-07-04
 
 ### Fixed

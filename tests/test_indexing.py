@@ -260,6 +260,178 @@ class TestDocumentIndexerColdDelete:
         assert fake_storage.delete_by_filter.call_args.kwargs.get("value") == str(doc_id)
 
 
+class TestDocumentIndexerAtomicReindex:
+    """Re-indexing must retain old points until replacements are ready."""
+
+    @pytest.mark.asyncio
+    async def test_embedding_failure_keeps_existing_points(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from mcp_docs.indexing.indexer import DocumentIndexer
+        from mcp_docs.models import ExtractionStatus
+        from mcp_docs.storage.database import DocumentStore
+
+        store = DocumentStore(db_path=tmp_path / "atomic.db")
+        try:
+            path = tmp_path / "document.txt"
+            path.write_text("replacement content")
+            doc = store.register(path)
+            store.update(doc.id, extraction_status=ExtractionStatus.INDEXED)
+            stored_points = {"summary-old", "chunk-old-0", "chunk-old-1"}
+
+            fake_storage = MagicMock()
+            fake_storage.delete_by_filter = AsyncMock(
+                side_effect=lambda *a, **k: stored_points.clear()
+            )
+            fake_storage.upsert_batch = AsyncMock()
+            fake_embedder = MagicMock()
+            fake_embedder.embed_batch = AsyncMock(
+                side_effect=RuntimeError("embedding unavailable")
+            )
+            fake_vocab = MagicMock()
+            fake_vocab.get_codebase_doc_count.return_value = 1
+            indexer = DocumentIndexer(
+                document_store=store,
+                storage=fake_storage,
+                embedder=fake_embedder,
+                global_vocab=fake_vocab,
+                collection_name="test",
+            )
+            monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
+
+            with pytest.raises(RuntimeError, match="embedding unavailable"):
+                await indexer.index_document(doc.id, "replacement content")
+
+            assert stored_points == {"summary-old", "chunk-old-0", "chunk-old-1"}
+            assert store.read(doc.id).extraction_status == ExtractionStatus.INDEXED
+            fake_storage.delete_by_filter.assert_not_awaited()
+            fake_storage.upsert_batch.assert_not_awaited()
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_reindex_replaces_points_and_removes_orphaned_chunks(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from mcp_docs.indexing.indexer import DocumentIndexer
+        from mcp_docs.models import ExtractionStatus
+        from mcp_docs.storage.database import DocumentStore
+
+        store = DocumentStore(db_path=tmp_path / "shrink.db")
+        try:
+            path = tmp_path / "document.txt"
+            path.write_text("shorter replacement")
+            doc = store.register(path)
+            stored_points = {"summary-old", "chunk-old-0", "chunk-old-1", "chunk-old-2"}
+            replacement_points = ["summary-new", "chunk-new-0"]
+            call_order: list[str] = []
+
+            async def create_points(*_args) -> list[str]:
+                call_order.append("create")
+                return replacement_points
+
+            async def delete_points(*_args, **_kwargs) -> None:
+                call_order.append("delete")
+                stored_points.clear()
+
+            async def upsert_points(_collection, points) -> None:
+                call_order.append("upsert")
+                stored_points.update(points)
+
+            fake_storage = MagicMock()
+            fake_storage.delete_by_filter = AsyncMock(side_effect=delete_points)
+            fake_storage.upsert_batch = AsyncMock(side_effect=upsert_points)
+            fake_vocab = MagicMock()
+            fake_vocab.get_codebase_doc_count.return_value = 1
+            indexer = DocumentIndexer(
+                document_store=store,
+                storage=fake_storage,
+                embedder=MagicMock(),
+                global_vocab=fake_vocab,
+                collection_name="test",
+            )
+            monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
+            monkeypatch.setattr(indexer, "_create_document_points", create_points)
+
+            assert await indexer.index_document(doc.id, "shorter replacement") == 2
+
+            assert call_order == ["create", "delete", "upsert"]
+            assert stored_points == {"summary-new", "chunk-new-0"}
+            assert store.read(doc.id).extraction_status == ExtractionStatus.INDEXED
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_empty_point_construction_fails_without_deleting(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from mcp_docs.indexing.indexer import DocumentIndexer
+        from mcp_docs.storage.database import DocumentStore
+
+        store = DocumentStore(db_path=tmp_path / "empty-points.db")
+        try:
+            path = tmp_path / "document.txt"
+            path.write_text("content")
+            doc = store.register(path)
+            fake_storage = MagicMock()
+            fake_storage.delete_by_filter = AsyncMock()
+            fake_storage.upsert_batch = AsyncMock()
+            fake_vocab = MagicMock()
+            fake_vocab.get_codebase_doc_count.return_value = 1
+            indexer = DocumentIndexer(
+                document_store=store,
+                storage=fake_storage,
+                embedder=MagicMock(),
+                global_vocab=fake_vocab,
+                collection_name="test",
+            )
+            monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
+            monkeypatch.setattr(
+                indexer, "_create_document_points", AsyncMock(return_value=[])
+            )
+
+            with pytest.raises(RuntimeError, match="produced no points"):
+                await indexer.index_document(doc.id, "content")
+
+            fake_storage.delete_by_filter.assert_not_awaited()
+            fake_storage.upsert_batch.assert_not_awaited()
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_delete_failure_still_upserts_the_replacements(self) -> None:
+        """A remote delete has an ambiguous outcome: Qdrant may have applied it
+        and only lost the response. Skipping the upsert would then leave the
+        document with no points at all, so the replacements are written anyway."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from mcp_docs.indexing.indexer import DocumentIndexer
+        from mcp_docs.storage.database import DocumentStore
+
+        fake_storage = MagicMock()
+        fake_storage.delete_by_filter = AsyncMock(
+            side_effect=RuntimeError("delete unavailable")
+        )
+        fake_storage.upsert_batch = AsyncMock()
+        indexer = DocumentIndexer(
+            document_store=MagicMock(spec=DocumentStore),
+            storage=fake_storage,
+            embedder=MagicMock(),
+            global_vocab=MagicMock(),
+            collection_name="test",
+        )
+
+        await indexer._replace_document_points(uuid4(), ["replacement"])
+
+        fake_storage.upsert_batch.assert_awaited_once_with("test", ["replacement"])
+
+
 class TestDocumentIndexerTagSync:
     """update_document_tags_in_index must refresh the tags filter payload on
     every point and, for an indexed document, rebuild the summary point (which
@@ -493,11 +665,14 @@ class TestIndexAllForceRebuild:
                 f.write_text(f"content {i}")
                 self._register(store, f, ExtractionStatus.INDEXED)
 
-            # Record delete/upsert ordering to prove existing points are
-            # replaced (delete) before the rebuilt point is written (upsert).
+            # Record construction/delete/upsert ordering for each document.
             call_order: list[str] = []
 
-            async def record_delete(_doc_id) -> None:
+            async def record_create(_doc, _content):
+                call_order.append("create")
+                return ["POINT"]
+
+            async def record_delete(_doc_id, **_kwargs) -> None:
                 call_order.append("delete")
 
             async def record_upsert(_collection, _points) -> None:
@@ -520,15 +695,66 @@ class TestIndexAllForceRebuild:
                 indexer, "_delete_document_points", AsyncMock(side_effect=record_delete)
             )
             monkeypatch.setattr(
-                indexer, "_create_document_points", AsyncMock(return_value=["POINT"])
+                indexer, "_create_document_points", AsyncMock(side_effect=record_create)
             )
 
             result = await indexer.index_all(force=True)
 
             assert result["indexed"] == n
             assert result["total"] == n
-            # Each document: delete its points, then upsert the rebuilt point.
-            assert call_order == ["delete", "upsert"] * n
+            # Each document: build replacements before deleting and upserting.
+            assert call_order == ["create", "delete", "upsert"] * n
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_construction_failure_keeps_existing_points(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A bulk re-index failure leaves the document's old points intact."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from mcp_docs.indexing.indexer import DocumentIndexer
+        from mcp_docs.models import ExtractionStatus
+        from mcp_docs.storage.database import DocumentStore
+
+        store = DocumentStore(db_path=tmp_path / "force-failure.db")
+        try:
+            path = tmp_path / "document.txt"
+            path.write_text("replacement content")
+            self._register(store, path, ExtractionStatus.INDEXED)
+            stored_points = {"summary-old", "chunk-old-0"}
+
+            fake_storage = MagicMock()
+            fake_storage.delete_by_filter = AsyncMock(
+                side_effect=lambda *a, **k: stored_points.clear()
+            )
+            fake_storage.upsert_batch = AsyncMock()
+            fake_vocab = MagicMock()
+            fake_vocab.tokenize.return_value = ["tok"]
+            indexer = DocumentIndexer(
+                document_store=store,
+                storage=fake_storage,
+                embedder=MagicMock(),
+                global_vocab=fake_vocab,
+                collection_name="test",
+            )
+            monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
+            monkeypatch.setattr(
+                indexer,
+                "_create_document_points",
+                AsyncMock(side_effect=RuntimeError("embedding unavailable")),
+            )
+
+            result = await indexer.index_all(force=True)
+
+            assert result["indexed"] == 0
+            assert result["errors"] == [
+                "document.txt: indexing failed - embedding unavailable"
+            ]
+            assert stored_points == {"summary-old", "chunk-old-0"}
+            fake_storage.delete_by_filter.assert_not_awaited()
+            fake_storage.upsert_batch.assert_not_awaited()
         finally:
             store.close()
 
