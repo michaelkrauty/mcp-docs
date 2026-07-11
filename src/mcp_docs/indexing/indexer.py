@@ -426,12 +426,7 @@ class DocumentIndexer:
             logger.debug(f"Could not retrieve indexed hashes (collection may not exist): {e}")
             return set()
 
-    async def _delete_document_points(
-        self,
-        document_id: UUID,
-        *,
-        raise_on_error: bool = False,
-    ) -> None:
+    async def _delete_document_points(self, document_id: UUID) -> None:
         """Delete all points for a document."""
         # Ensure storage is initialized: this path may run on a cold indexer
         # (e.g. delete_document / remove_document_root right after startup),
@@ -445,8 +440,6 @@ class DocumentIndexer:
                 value=str(document_id),
             )
         except Exception as e:
-            if raise_on_error:
-                raise
             logger.warning(f"Failed to delete document points: {e}")
 
     async def _replace_document_points(
@@ -454,16 +447,22 @@ class DocumentIndexer:
         document_id: UUID,
         points: list[PointStruct],
     ) -> None:
-        """Replace a document's points after validating the new index.
+        """Replace a document's points once the replacements are built.
 
-        Every successfully built document index contains a summary point. An
-        empty result signals failed construction, so the old index is retained.
+        Every successfully built document index contains a summary point, so an
+        empty result means construction failed and the old index is left alone.
+
+        A failed delete is logged and the upsert still runs. A remote delete has
+        an ambiguous outcome: Qdrant may have applied it and only lost the
+        response, in which case skipping the upsert would leave the document with
+        no points at all. Writing the replacements keeps it searchable either
+        way, at the cost of possibly stranding surplus chunk points from a
+        shrunken document, which is the lesser failure.
         """
         if not points:
             raise RuntimeError(f"Point construction produced no points for document {document_id}")
 
-        await self._delete_document_points(document_id, raise_on_error=True)
-        assert self.storage is not None
+        await self._delete_document_points(document_id)
         await self.storage.upsert_batch(self.collection_name, points)
 
     async def update_document_path_in_index(self, document_id: UUID, new_path: str) -> None:

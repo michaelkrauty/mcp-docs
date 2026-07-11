@@ -405,7 +405,10 @@ class TestDocumentIndexerAtomicReindex:
             store.close()
 
     @pytest.mark.asyncio
-    async def test_delete_failure_prevents_replacement_upsert(self) -> None:
+    async def test_delete_failure_still_upserts_the_replacements(self) -> None:
+        """A remote delete has an ambiguous outcome: Qdrant may have applied it
+        and only lost the response. Skipping the upsert would then leave the
+        document with no points at all, so the replacements are written anyway."""
         from unittest.mock import AsyncMock, MagicMock
 
         from mcp_docs.indexing.indexer import DocumentIndexer
@@ -424,10 +427,9 @@ class TestDocumentIndexerAtomicReindex:
             collection_name="test",
         )
 
-        with pytest.raises(RuntimeError, match="delete unavailable"):
-            await indexer._replace_document_points(uuid4(), ["replacement"])
+        await indexer._replace_document_points(uuid4(), ["replacement"])
 
-        fake_storage.upsert_batch.assert_not_awaited()
+        fake_storage.upsert_batch.assert_awaited_once_with("test", ["replacement"])
 
 
 class TestDocumentIndexerTagSync:
