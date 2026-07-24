@@ -240,6 +240,7 @@ class TestDocumentIndexerColdDelete:
         from mcp_docs.storage.database import DocumentStore
 
         fake_storage = MagicMock()
+        fake_storage.scroll_points = AsyncMock(return_value=[])
         fake_storage.delete_by_filter = AsyncMock()
         monkeypatch.setattr(indexer_mod, "QdrantStorage", lambda *a, **k: fake_storage)
         monkeypatch.setattr(indexer_mod, "EmbeddingClient", lambda *a, **k: MagicMock())
@@ -282,6 +283,7 @@ class TestDocumentIndexerAtomicReindex:
             stored_points = {"summary-old", "chunk-old-0", "chunk-old-1"}
 
             fake_storage = MagicMock()
+            fake_storage.scroll_points = AsyncMock(return_value=[])
             fake_storage.delete_by_filter = AsyncMock(
                 side_effect=lambda *a, **k: stored_points.clear()
             )
@@ -343,6 +345,7 @@ class TestDocumentIndexerAtomicReindex:
                 stored_points.update(points)
 
             fake_storage = MagicMock()
+            fake_storage.scroll_points = AsyncMock(return_value=[])
             fake_storage.delete_by_filter = AsyncMock(side_effect=delete_points)
             fake_storage.upsert_batch = AsyncMock(side_effect=upsert_points)
             fake_vocab = MagicMock()
@@ -355,7 +358,7 @@ class TestDocumentIndexerAtomicReindex:
                 collection_name="test",
             )
             monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
-            monkeypatch.setattr(indexer, "_create_document_points", create_points)
+            monkeypatch.setattr(indexer, "_build_points", create_points)
 
             assert await indexer.index_document(doc.id, "shorter replacement") == 2
 
@@ -380,6 +383,7 @@ class TestDocumentIndexerAtomicReindex:
             path.write_text("content")
             doc = store.register(path)
             fake_storage = MagicMock()
+            fake_storage.scroll_points = AsyncMock(return_value=[])
             fake_storage.delete_by_filter = AsyncMock()
             fake_storage.upsert_batch = AsyncMock()
             fake_vocab = MagicMock()
@@ -393,7 +397,7 @@ class TestDocumentIndexerAtomicReindex:
             )
             monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
             monkeypatch.setattr(
-                indexer, "_create_document_points", AsyncMock(return_value=[])
+                indexer, "_build_points", AsyncMock(return_value=[])
             )
 
             with pytest.raises(RuntimeError, match="produced no points"):
@@ -415,6 +419,7 @@ class TestDocumentIndexerAtomicReindex:
         from mcp_docs.storage.database import DocumentStore
 
         fake_storage = MagicMock()
+        fake_storage.scroll_points = AsyncMock(return_value=[])
         fake_storage.delete_by_filter = AsyncMock(
             side_effect=RuntimeError("delete unavailable")
         )
@@ -456,6 +461,7 @@ class TestDocumentIndexerTagSync:
             doc = store.update_tags(doc.id, ["alpha", "beta"])
 
             fake_storage = MagicMock()
+            fake_storage.scroll_points = AsyncMock(return_value=[])
             fake_storage.update_payload = AsyncMock()
             fake_storage.upsert_batch = AsyncMock()
             fake_embedder = MagicMock()
@@ -506,6 +512,7 @@ class TestDocumentIndexerTagSync:
             doc = store.update_tags(doc.id, ["x"])
 
             fake_storage = MagicMock()
+            fake_storage.scroll_points = AsyncMock(return_value=[])
             fake_storage.update_payload = AsyncMock()
             fake_storage.upsert_batch = AsyncMock()
             fake_embedder = MagicMock()
@@ -668,7 +675,7 @@ class TestIndexAllForceRebuild:
             # Record construction/delete/upsert ordering for each document.
             call_order: list[str] = []
 
-            async def record_create(_doc, _content):
+            async def record_create(_doc, _summary, _chunks):
                 call_order.append("create")
                 return ["POINT"]
 
@@ -679,8 +686,10 @@ class TestIndexAllForceRebuild:
                 call_order.append("upsert")
 
             fake_storage = MagicMock()
+            fake_storage.scroll_points = AsyncMock(return_value=[])
             fake_storage.upsert_batch = AsyncMock(side_effect=record_upsert)
             fake_vocab = MagicMock()
+            fake_vocab.get_codebase_doc_count.return_value = 1
             fake_vocab.tokenize.return_value = ["tok"]
 
             indexer = DocumentIndexer(
@@ -695,7 +704,7 @@ class TestIndexAllForceRebuild:
                 indexer, "_delete_document_points", AsyncMock(side_effect=record_delete)
             )
             monkeypatch.setattr(
-                indexer, "_create_document_points", AsyncMock(side_effect=record_create)
+                indexer, "_build_points", AsyncMock(side_effect=record_create)
             )
 
             result = await indexer.index_all(force=True)
@@ -726,11 +735,13 @@ class TestIndexAllForceRebuild:
             stored_points = {"summary-old", "chunk-old-0"}
 
             fake_storage = MagicMock()
+            fake_storage.scroll_points = AsyncMock(return_value=[])
             fake_storage.delete_by_filter = AsyncMock(
                 side_effect=lambda *a, **k: stored_points.clear()
             )
             fake_storage.upsert_batch = AsyncMock()
             fake_vocab = MagicMock()
+            fake_vocab.get_codebase_doc_count.return_value = 1
             fake_vocab.tokenize.return_value = ["tok"]
             indexer = DocumentIndexer(
                 document_store=store,
@@ -742,7 +753,7 @@ class TestIndexAllForceRebuild:
             monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
             monkeypatch.setattr(
                 indexer,
-                "_create_document_points",
+                "_build_points",
                 AsyncMock(side_effect=RuntimeError("embedding unavailable")),
             )
 
@@ -798,8 +809,10 @@ class TestIndexAllForceRebuild:
             monkeypatch.setattr(indexer_mod, "extract_content", spy_extract)
 
             fake_storage = MagicMock()
+            fake_storage.scroll_points = AsyncMock(return_value=[])
             fake_storage.upsert_batch = AsyncMock()
             fake_vocab = MagicMock()
+            fake_vocab.get_codebase_doc_count.return_value = 1
             fake_vocab.tokenize.return_value = ["tok"]
 
             indexer = DocumentIndexer(
@@ -812,7 +825,7 @@ class TestIndexAllForceRebuild:
             monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
             monkeypatch.setattr(indexer, "_delete_document_points", AsyncMock())
             monkeypatch.setattr(
-                indexer, "_create_document_points", AsyncMock(return_value=["POINT"])
+                indexer, "_build_points", AsyncMock(return_value=["POINT"])
             )
             # No already-indexed hashes, so EXTRACTED docs survive the filter.
             monkeypatch.setattr(
@@ -849,6 +862,7 @@ class TestDocumentIndexerEmptyContent:
             doc = store.register(f)
 
             fake_storage = MagicMock()
+            fake_storage.scroll_points = AsyncMock(return_value=[])
             fake_embedder = MagicMock()
             fake_embedder.embed_batch = AsyncMock(
                 side_effect=lambda texts: [[0.1, 0.2, 0.3] for _ in texts]
@@ -864,7 +878,8 @@ class TestDocumentIndexerEmptyContent:
                 indexer, "_create_point", MagicMock(return_value="POINT")
             )
 
-            points = await indexer._create_document_points(doc, content="")
+            summary, chunks = indexer._split_document(doc, "")
+            points = await indexer._build_points(doc, summary, chunks)
 
             fake_embedder.embed_batch.assert_awaited_once()
             texts = fake_embedder.embed_batch.await_args.args[0]

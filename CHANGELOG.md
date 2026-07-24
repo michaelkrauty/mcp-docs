@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.2.0] - 2026-07-24
+
+### Fixed
+
+- **The sparse vocabulary now learns from every document, not just the first one.** Registration was gated on the docs corpus having no documents at all, so once the very first document was indexed the guard never fired again and no later document's terms were ever registered. `vectorize_document` ignores tokens it does not know, so every term introduced after that first document was silently dropped from its own sparse vector and could not be matched by the lexical half of hybrid search. Dense retrieval still found those documents, which is why the gap was invisible. Each document now folds its own terms into the shared vocabulary before it is vectorized.
+- **An incremental bulk index no longer discards the rest of the corpus's vocabulary contribution.** `index_all(force=False)` collected tokens from only the documents that changed and passed them to `register_codebase`, which replaces a codebase's whole contribution: every unchanged document's document-frequency counts were subtracted and the recorded document count collapsed to the size of the batch. Incremental runs now apply a delta and leave the rest of the corpus alone, while a force rebuild still replaces the contribution outright because it reindexes everything.
+- **Re-indexing and deleting a document now retire the terms they remove.** A document's tokens were never subtracted when its content changed or when it left the index, so document frequencies drifted upward without bound. Both paths now subtract the document's previously indexed terms, and deletion also decrements the document count.
+- **A force rebuild keeps the contribution of documents it could not re-extract.** Their points are left in place, so dropping their terms understated the document frequency of everything still searchable in them.
+
+### Changed
+
+- **Pinned vector-core to v1.3.1**, which this change needs. `update_codebase_incremental` there could not establish a codebase's document count, only adjust one that already existed, so a corpus maintained purely by deltas reported no documents forever. Working around that from here would have meant probing the count and falling back to a full registration, which is a check-then-act sequence two server processes can interleave on. It also caps a removal at what the codebase actually contributed and floors counts and frequencies at zero, so a mis-accounted removal can no longer take another codebase's share of a shared term or make every search raise.
+- **A document's registered terms are now taken from the text that is actually stored** (its summary point plus its chunk points) rather than from the raw extracted content. The removal side reads that same text back from the index, and the symmetry is what keeps repeated edits from leaking document frequency. A practical side effect: terms that appear only in the summary line, such as the filename, tags, and title, are now part of the vocabulary and can be matched lexically.
+- Vocabulary maintenance is best-effort and never fails an index operation: a shared-database error is logged, and the drift it causes is repaired by the next force rebuild.
+
+### Upgrade note
+
+Vocabulary counts recorded before this release are not repaired automatically, and sparse vectors written while a term was unknown do not contain it. Run `index_all_documents` with `force=true` once to rebuild the contribution and re-vectorize the corpus. Be aware that a force rebuild re-extracts every document, which for scanned PDFs means running OCR again.
+
+Until that rebuild runs, the recorded contribution describes far less than the corpus really holds, so removals can subtract a term the docs corpus was never credited with. Document frequencies are floored at zero, so nothing is corrupted, but a term shared with another indexed codebase can be left undercounted until that codebase re-registers. This is bounded, and it is strictly better than the state it replaces, where the lexical half of document search was not working at all.
+
+### Known limitations
+
+- `update_document_tags_in_index` and `update_document_filename_in_index` rewrite a document's summary point without adjusting the contribution, so renaming a tag or a file leaks its old summary terms and does not register its new ones (#87).
+- A force rebuild reconstructs the contribution from documents the registry lists as extracted or indexed. A document in another extraction state that still has points is not represented in it (#88).
+- Two server processes indexing the same document concurrently can interleave between reading its stored terms and writing its replacements, leaving the contribution describing neither (#88).
+
 ## [1.1.45] - 2026-07-10
 
 ### Changed
