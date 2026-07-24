@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -16,7 +17,13 @@ from vector_core import (
 
 from mcp_docs.extraction.extractor import extract_content
 from mcp_docs.indexing.chunker import DocumentChunker, chunk_document
-from mcp_docs.models import Document, DocumentType, ExtractionError, ExtractionStatus
+from mcp_docs.models import (
+    Document,
+    DocumentChunk,
+    DocumentType,
+    ExtractionError,
+    ExtractionStatus,
+)
 from mcp_docs.settings import settings
 from mcp_docs.storage.database import DocumentStore
 
@@ -101,6 +108,114 @@ class DocumentIndexer:
             ],
         )
 
+    # ------------------------------------------------------------------
+    # Sparse vocabulary accounting
+    #
+    # The docs corpus contributes to a GlobalVocabulary shared with every other
+    # indexed codebase. Two invariants keep sparse retrieval and ranking honest:
+    #
+    # 1. Every term in an indexed document is in the vocabulary before that
+    #    document is vectorized. ``vectorize_document`` silently drops unknown
+    #    tokens, so a term registered late never appears in the sparse vector of
+    #    the document that introduced it.
+    # 2. The contribution describes exactly the currently indexed corpus. Its
+    #    document count and document frequencies feed the IDF weights used to
+    #    rank results for *every* codebase sharing the database, so a document
+    #    counted twice, or never retired, skews ranking well beyond mcp-docs.
+    #
+    # A document's token set is derived from the text of its points (summary
+    # plus chunks) rather than from the raw extracted content. That is the same
+    # text the removal side reads back from Qdrant, and symmetry is what keeps
+    # repeated edits from leaking document frequency.
+    # ------------------------------------------------------------------
+
+    def _token_set(self, texts: Iterable[str]) -> set[str]:
+        """Vocabulary token set for one document, given its point texts."""
+        tokens: set[str] = set()
+        for text in texts:
+            tokens.update(self.global_vocab.tokenize(text))
+        return tokens
+
+    async def _indexed_token_set(self, document_id: UUID) -> tuple[bool, set[str]]:
+        """Tokens currently registered for a document, read back from its points.
+
+        Returns ``(is_indexed, tokens)``. An unindexed document has no points
+        and contributes nothing, which is distinct from an indexed document
+        whose points happen to hold no usable tokens.
+        """
+        assert self.storage is not None  # set by _ensure_components
+        payloads = await self.storage.scroll_points(
+            self.collection_name,
+            filter_conditions=[
+                FieldCondition(key="document_id", match=MatchValue(value=str(document_id))),
+            ],
+            payload_fields=["content"],
+            max_results=0,
+        )
+        return bool(payloads), self._token_set(p.get("content") or "" for p in payloads)
+
+    def _update_vocabulary(
+        self,
+        added_tokens: list[set[str]],
+        removed_tokens: list[set[str]],
+        net_doc_change: int,
+    ) -> None:
+        """Apply a vocabulary delta, logging rather than raising on failure.
+
+        A delta can only adjust a contribution that already exists:
+        ``update_codebase_incremental`` moves the document count with a bare
+        ``UPDATE``, which does nothing while the docs corpus has no row yet. The
+        first registration therefore goes through ``register_codebase``, which
+        establishes the contribution and its document count in one transaction.
+        Anything already recorded is replaced, which is what an empty
+        contribution wants anyway.
+
+        Indexing must not fail because the shared vocabulary database was busy:
+        a missed delta degrades ranking, while a raised error would lose the
+        document. ``index_all(force=True)`` rebuilds the contribution from
+        scratch and repairs any drift.
+        """
+        if not added_tokens and not removed_tokens and not net_doc_change:
+            return
+        try:
+            if added_tokens and self.global_vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) <= 0:
+                self.global_vocab.register_codebase(DOCS_CODEBASE_ID, added_tokens)
+                return
+            self.global_vocab.update_codebase_incremental(
+                DOCS_CODEBASE_ID,
+                added_tokens=added_tokens,
+                removed_tokens=removed_tokens,
+                net_doc_change=net_doc_change,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to update the docs vocabulary contribution: {e}")
+
+    async def _revert_vocabulary_update(self, document_id: UUID, registered: set[str]) -> None:
+        """Restore the contribution for a document whose indexing failed.
+
+        Which half of the replace failed decides what is actually stored: an
+        embedding failure leaves the previous points intact, while a failed
+        upsert after a successful delete leaves none. Rather than guess, read
+        the points back and make the contribution describe them.
+
+        Best-effort: a failure here is logged so the original indexing error is
+        the one that propagates.
+        """
+        try:
+            still_indexed, stored = await self._indexed_token_set(document_id)
+        except Exception as e:
+            logger.warning(
+                f"Could not read back document {document_id} to repair its "
+                f"vocabulary contribution: {e}"
+            )
+            return
+        actual = [stored] if still_indexed else []
+        self._update_vocabulary(
+            added_tokens=actual,
+            removed_tokens=[registered],
+            net_doc_change=len(actual) - 1,
+        )
+
     async def index_document(
         self,
         document_id: UUID,
@@ -109,8 +224,9 @@ class DocumentIndexer:
         """
         Index a single document.
 
-        For single document indexing, GlobalVocabulary should already be trained.
-        If not, a warning is logged and sparse vectors may be suboptimal.
+        The document's vocabulary contribution is updated before its vectors are
+        built, so terms this document introduces are known to the vocabulary in
+        time to appear in its own sparse vector.
 
         Args:
             document_id: Document UUID
@@ -128,19 +244,23 @@ class DocumentIndexer:
             logger.error(f"Document not found: {document_id}")
             return 0
 
-        # Ensure GlobalVocabulary has vocabulary
-        if self.global_vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == 0:
-            logger.warning(
-                "GlobalVocabulary not trained for docs codebase. "
-                "Sparse vectors will be trained on this document only."
-            )
-            # Train on just this document
-            tokens = set(self.global_vocab.tokenize(content))
-            self.global_vocab.register_codebase(DOCS_CODEBASE_ID, [tokens])
+        summary, chunks = self._split_document(document, content)
+        added = self._token_set([summary, *(chunk.content for chunk in chunks)])
+        was_indexed, previous = await self._indexed_token_set(document_id)
+
+        self._update_vocabulary(
+            added_tokens=[added],
+            removed_tokens=[previous] if was_indexed else [],
+            net_doc_change=0 if was_indexed else 1,
+        )
 
         # Embedding can fail, so preserve the existing index until replacements are ready.
-        points = await self._create_document_points(document, content)
-        await self._replace_document_points(document_id, points)
+        try:
+            points = await self._build_points(document, summary, chunks)
+            await self._replace_document_points(document_id, points)
+        except Exception:
+            await self._revert_vocabulary_update(document_id, added)
+            raise
 
         # Update status to indexed
         self.document_store.update(
@@ -208,8 +328,8 @@ class DocumentIndexer:
 
         # Pass 1: Extract content and collect tokens for GlobalVocabulary
         # We re-extract content here since it's not stored in the database
-        doc_contents: dict[UUID, str] = {}
-        tokens_per_doc: list[set[str]] = []
+        units: dict[UUID, tuple[str, list[DocumentChunk]]] = {}
+        tokens_by_doc: dict[UUID, set[str]] = {}
         extraction_errors: list[str] = []
 
         for doc in docs_to_index:
@@ -222,12 +342,13 @@ class DocumentIndexer:
 
                 # Re-extract content for indexing
                 extracted = extract_content(path, DocumentType(doc.doc_type))
-                content = extracted.text
-                doc_contents[doc.id] = content
+                summary, chunks = self._split_document(doc, extracted.text)
+                units[doc.id] = (summary, chunks)
 
-                # Tokenize actual content (not just metadata)
-                tokens = set(self.global_vocab.tokenize(content))
-                tokens_per_doc.append(tokens)
+                # Tokenize the text that will actually be stored as points, so
+                # a later reindex or delete subtracts exactly what was added.
+                tokens = self._token_set([summary, *(chunk.content for chunk in chunks)])
+                tokens_by_doc[doc.id] = tokens
                 logger.debug(f"Tokenized {doc.filename}: {len(tokens)} unique tokens")
 
             except ExtractionError as e:
@@ -237,7 +358,7 @@ class DocumentIndexer:
                 logger.error(f"Unexpected error extracting {doc.filename}: {e}")
                 extraction_errors.append(f"{doc.filename}: {e}")
 
-        if not doc_contents:
+        if not units:
             logger.error("No documents could be extracted for indexing")
             return {
                 "indexed": 0,
@@ -245,23 +366,24 @@ class DocumentIndexer:
                 "errors": extraction_errors,
             }
 
-        # Register vocabulary with GlobalVocabulary
-        logger.info(f"Registering vocabulary from {len(tokens_per_doc)} documents")
-        self.global_vocab.register_codebase(DOCS_CODEBASE_ID, tokens_per_doc)
+        # Register the vocabulary before Pass 2 vectorizes anything, so every
+        # term in this batch is available to every document in it.
+        logger.info(f"Registering vocabulary from {len(tokens_by_doc)} documents")
+        await self._register_batch_vocabulary(docs_to_index, tokens_by_doc, force=force)
 
         # Pass 2: Generate embeddings and create points (summary + chunks)
         total_points = 0
         indexed_count = 0
 
         for doc in docs_to_index:
-            if doc.id not in doc_contents:
+            if doc.id not in units:
                 continue  # Extraction failed for this doc
 
             try:
-                content = doc_contents[doc.id]
+                summary, chunks = units[doc.id]
 
                 # Create both summary AND chunk points (like index_document does)
-                points = await self._create_document_points(doc, content)
+                points = await self._build_points(doc, summary, chunks)
                 await self._replace_document_points(doc.id, points)
 
                 total_points += len(points)
@@ -274,6 +396,7 @@ class DocumentIndexer:
             except Exception as e:
                 logger.error(f"Failed to index document {doc.id}: {e}")
                 extraction_errors.append(f"{doc.filename}: indexing failed - {e}")
+                await self._revert_vocabulary_update(doc.id, tokens_by_doc[doc.id])
 
         logger.info(f"Indexed {indexed_count} documents with {total_points} points")
 
@@ -284,6 +407,61 @@ class DocumentIndexer:
             "errors": extraction_errors if extraction_errors else None,
         }
 
+    async def _register_batch_vocabulary(
+        self,
+        docs_to_index: list[Document],
+        tokens_by_doc: dict[UUID, set[str]],
+        force: bool,
+    ) -> None:
+        """Fold one ``index_all`` batch into the docs vocabulary contribution.
+
+        A force rebuild reindexes the whole corpus, so it replaces the
+        contribution outright. Documents whose extraction failed keep their
+        existing points, so their stored tokens are carried over rather than
+        dropped: silently retiring the contribution of content that is still
+        searchable would understate every one of its terms' document frequency.
+
+        An incremental run only sees the documents that changed, so it applies a
+        delta instead. Replacing the contribution there would subtract the
+        entire unchanged corpus and reset the document count to the size of the
+        batch.
+        """
+        await self._ensure_components()
+
+        if not force:
+            added: list[set[str]] = []
+            removed: list[set[str]] = []
+            new_documents = 0
+            for doc in docs_to_index:
+                tokens = tokens_by_doc.get(doc.id)
+                if tokens is None:
+                    continue  # Extraction failed: its points and tokens both stand
+                added.append(tokens)
+                was_indexed, previous = await self._indexed_token_set(doc.id)
+                if was_indexed:
+                    removed.append(previous)
+                else:
+                    new_documents += 1
+            self._update_vocabulary(
+                added_tokens=added,
+                removed_tokens=removed,
+                net_doc_change=new_documents,
+            )
+            return
+
+        tokens_per_doc = [tokens_by_doc[doc.id] for doc in docs_to_index if doc.id in tokens_by_doc]
+        for doc in docs_to_index:
+            if doc.id in tokens_by_doc:
+                continue
+            was_indexed, stored = await self._indexed_token_set(doc.id)
+            if was_indexed:
+                tokens_per_doc.append(stored)
+
+        try:
+            self.global_vocab.register_codebase(DOCS_CODEBASE_ID, tokens_per_doc)
+        except Exception as e:
+            logger.warning(f"Failed to rebuild the docs vocabulary contribution: {e}")
+
     async def delete_document_index(self, document_id: UUID) -> None:
         """
         Remove a document from the index.
@@ -291,30 +469,63 @@ class DocumentIndexer:
         Args:
             document_id: Document UUID to remove
         """
+        was_indexed, tokens = await self._indexed_token_set_safe(document_id)
         await self._delete_document_points(document_id)
+        if was_indexed:
+            self._update_vocabulary(
+                added_tokens=[],
+                removed_tokens=[tokens],
+                net_doc_change=-1,
+            )
 
-    async def _create_document_points(
+    async def _indexed_token_set_safe(self, document_id: UUID) -> tuple[bool, set[str]]:
+        """``_indexed_token_set`` for best-effort callers.
+
+        Deletion must proceed even if the tokens cannot be read back; the cost
+        is a stale contribution that the next force rebuild repairs, which beats
+        leaving the points in place.
+        """
+        await self._ensure_components()
+        try:
+            return await self._indexed_token_set(document_id)
+        except Exception as e:
+            logger.warning(
+                f"Could not read document {document_id} back before deleting it "
+                f"from the index; its vocabulary contribution is left in place: {e}"
+            )
+            return False, set()
+
+    def _split_document(
         self,
         document: Document,
         content: str,
-    ) -> list[PointStruct]:
-        """Create Qdrant points for a document and its chunks."""
-        points: list[PointStruct] = []
+    ) -> tuple[str, list[DocumentChunk]]:
+        """Split a document into the units that become points.
 
-        # Chunk the document
+        Returns the summary text and the chunks that will be stored, so callers
+        can derive the document's vocabulary token set without embedding
+        anything.
+        """
         chunks = chunk_document(document.id, content, document.page_count)
 
         # Drop empty or whitespace-only chunks so an empty extraction is not
         # embedded as an empty string or stored as a meaningless chunk point;
-        # the summary point below still keeps the document searchable.
+        # the summary point still keeps the document searchable.
         chunks = [chunk for chunk in chunks if chunk.content.strip()]
 
-        # Prepare texts for batch embedding
-        texts = [chunk.content for chunk in chunks]
+        return self._generate_doc_summary(document), chunks
 
-        # Add document summary
-        summary = self._generate_doc_summary(document)
-        texts.insert(0, summary)
+    async def _build_points(
+        self,
+        document: Document,
+        summary: str,
+        chunks: list[DocumentChunk],
+    ) -> list[PointStruct]:
+        """Embed a document's summary and chunks and turn them into points."""
+        points: list[PointStruct] = []
+
+        # Prepare texts for batch embedding, summary first
+        texts = [summary, *(chunk.content for chunk in chunks)]
 
         # Batch embed
         embeddings = await self.embedder.embed_batch(texts)
