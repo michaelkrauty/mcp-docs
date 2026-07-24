@@ -246,12 +246,20 @@ class TestFailedVocabularyWriteIsNotCompensated:
         before_count = vocab.get_codebase_doc_count(DOCS_CODEBASE_ID)
         before_shared = _doc_freq(vocab, "shared")
 
-        # The shared vocabulary database is busy, and then embedding fails too.
-        monkeypatch.setattr(
-            vocab,
-            "update_codebase_incremental",
-            MagicMock(side_effect=RuntimeError("database is locked")),
-        )
+        # The shared vocabulary database is busy for the delta only. A mock
+        # that failed every call would make the erroneous compensation fail
+        # too, so the counts would come out right for the wrong reason and the
+        # test would pass with or without the fix.
+        real_update = vocab.update_codebase_incremental
+        calls = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("database is locked")
+            return real_update(*args, **kwargs)
+
+        monkeypatch.setattr(vocab, "update_codebase_incremental", flaky)
         failing = MagicMock()
         failing.embed_batch = AsyncMock(side_effect=RuntimeError("embedding unavailable"))
         indexer.embedder = failing
@@ -260,6 +268,44 @@ class TestFailedVocabularyWriteIsNotCompensated:
         with pytest.raises(RuntimeError, match="embedding unavailable"):
             await indexer.index_document(doomed.id, "beta shared")
 
+        assert vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == before_count
+        assert _doc_freq(vocab, "shared") == before_shared
+
+    @pytest.mark.asyncio
+    async def test_failed_batch_delta_then_failed_index_leaves_counts_alone(
+        self, tmp_path, store, vocab, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The same invariant on the bulk path, whose gate covers a batch."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        indexer, _ = _make_indexer(store, vocab)
+        monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
+
+        established = _register(store, tmp_path, "established.txt", "alpha shared")
+        await indexer.index_document(established.id, "alpha shared")
+        before_count = vocab.get_codebase_doc_count(DOCS_CODEBASE_ID)
+        before_shared = _doc_freq(vocab, "shared")
+
+        real_update = vocab.update_codebase_incremental
+        calls = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("database is locked")
+            return real_update(*args, **kwargs)
+
+        monkeypatch.setattr(vocab, "update_codebase_incremental", flaky)
+        failing = MagicMock()
+        failing.embed_batch = AsyncMock(side_effect=RuntimeError("embedding unavailable"))
+        indexer.embedder = failing
+
+        fresh = _register(store, tmp_path, "fresh.txt", "beta shared")
+        store.update(fresh.id, extraction_status=ExtractionStatus.EXTRACTED)
+
+        result = await indexer.index_all(force=False)
+
+        assert result["indexed"] == 0
         assert vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == before_count
         assert _doc_freq(vocab, "shared") == before_shared
 
@@ -313,6 +359,37 @@ class TestDeleteDocumentVocabulary:
 
         assert vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == 1
         assert _doc_freq(vocab, "stubbornterm") == 1
+
+    @pytest.mark.asyncio
+    async def test_a_lost_response_still_retires_the_contribution(
+        self, tmp_path, store, vocab, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A raised error does not prove the points survived.
+
+        Qdrant can apply the delete and lose only the response. Reading the
+        points back is what settles it, and their absence means the deletion
+        happened.
+        """
+        from unittest.mock import AsyncMock
+
+        indexer, storage = _make_indexer(store, vocab)
+        monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
+
+        doc = _register(store, tmp_path, "vanished.txt", "vanishedterm")
+        await indexer.index_document(doc.id, "vanishedterm")
+
+        real_delete = storage.delete_by_filter
+
+        async def apply_then_fail(*args, **kwargs):
+            await real_delete(*args, **kwargs)
+            raise RuntimeError("connection reset")
+
+        storage.delete_by_filter = apply_then_fail
+
+        await indexer.delete_document_index(doc.id)
+
+        assert vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == 0
+        assert _doc_freq(vocab, "vanishedterm") == 0
 
     @pytest.mark.asyncio
     async def test_delete_of_an_unindexed_document_is_a_no_op(

@@ -663,6 +663,13 @@ class DocumentIndexer:
         fail; but the outcome is returned so a caller that draws a conclusion
         from the deletion, such as retiring the document's vocabulary
         contribution, can tell whether the points really went away.
+
+        A raised error does not prove the points survived: Qdrant may have
+        applied the delete and lost only the response. The points are therefore
+        read back before reporting failure, and their absence counts as
+        success. If that read fails too the outcome is genuinely unknown, and
+        failure is the safer answer, because it leaves the contribution in
+        place for content that may still be searchable.
         """
         # Ensure storage is initialized: this path may run on a cold indexer
         # (e.g. delete_document / remove_document_root right after startup),
@@ -677,7 +684,14 @@ class DocumentIndexer:
             )
         except Exception as e:
             logger.warning(f"Failed to delete document points: {e}")
-            return False
+            try:
+                still_indexed, _ = await self._indexed_token_set(document_id)
+            except Exception as read_error:
+                logger.warning(
+                    f"Could not confirm whether document {document_id} was deleted: {read_error}"
+                )
+                return False
+            return not still_indexed
         return True
 
     async def _replace_document_points(
