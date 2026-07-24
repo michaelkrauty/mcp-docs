@@ -18,6 +18,14 @@
 
 Vocabulary counts recorded before this release are not repaired automatically, and sparse vectors written while a term was unknown do not contain it. Run `index_all_documents` with `force=true` once to rebuild the contribution and re-vectorize the corpus. Be aware that a force rebuild re-extracts every document, which for scanned PDFs means running OCR again.
 
+Until that rebuild runs, the recorded contribution describes far less than the corpus really holds, so removals can subtract a term the docs corpus was never credited with. Document frequencies are floored at zero, so nothing is corrupted, but a term shared with another indexed codebase can be left undercounted until that codebase re-registers. This is bounded, and it is strictly better than the state it replaces, where the lexical half of document search was not working at all.
+
+### Known limitations
+
+- `update_document_tags_in_index` and `update_document_filename_in_index` rewrite a document's summary point without adjusting the contribution, so renaming a tag or a file leaks its old summary terms and does not register its new ones (#87).
+- A force rebuild reconstructs the contribution from documents the registry lists as extracted or indexed. A document in another extraction state that still has points is not represented in it (#88).
+- Two server processes indexing the same document concurrently can interleave between reading its stored terms and writing its replacements, leaving the contribution describing neither (#88).
+
 ## [1.1.45] - 2026-07-10
 
 ### Changed

@@ -228,6 +228,42 @@ class TestIndexDocumentVocabulary:
         assert _doc_freq(vocab, "unstorabletoken") == 0
 
 
+class TestFailedVocabularyWriteIsNotCompensated:
+    """A delta that never reached the database must not be inverted. Doing so
+    would subtract tokens, and a document, that were never added."""
+
+    @pytest.mark.asyncio
+    async def test_failed_delta_then_failed_index_leaves_counts_alone(
+        self, tmp_path, store, vocab, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        indexer, _ = _make_indexer(store, vocab)
+        monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
+
+        established = _register(store, tmp_path, "established.txt", "alpha shared")
+        await indexer.index_document(established.id, "alpha shared")
+        before_count = vocab.get_codebase_doc_count(DOCS_CODEBASE_ID)
+        before_shared = _doc_freq(vocab, "shared")
+
+        # The shared vocabulary database is busy, and then embedding fails too.
+        monkeypatch.setattr(
+            vocab,
+            "update_codebase_incremental",
+            MagicMock(side_effect=RuntimeError("database is locked")),
+        )
+        failing = MagicMock()
+        failing.embed_batch = AsyncMock(side_effect=RuntimeError("embedding unavailable"))
+        indexer.embedder = failing
+
+        doomed = _register(store, tmp_path, "doomed.txt", "beta shared")
+        with pytest.raises(RuntimeError, match="embedding unavailable"):
+            await indexer.index_document(doomed.id, "beta shared")
+
+        assert vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == before_count
+        assert _doc_freq(vocab, "shared") == before_shared
+
+
 class TestDeleteDocumentVocabulary:
     @pytest.mark.asyncio
     async def test_delete_retires_the_document_contribution(
@@ -250,6 +286,33 @@ class TestDeleteDocumentVocabulary:
         assert vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == 1
         assert _doc_freq(vocab, "droppedterm") == 0
         assert _doc_freq(vocab, "shared") == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_deletion_keeps_the_contribution(
+        self, tmp_path, store, vocab, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The points are still there, so their terms are still in the corpus.
+
+        Writing them off would understate the document frequency of everything
+        the document still contains.
+        """
+        from unittest.mock import AsyncMock
+
+        indexer, storage = _make_indexer(store, vocab)
+        monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
+
+        doc = _register(store, tmp_path, "stubborn.txt", "stubbornterm")
+        await indexer.index_document(doc.id, "stubbornterm")
+
+        async def refuse(*_args, **_kwargs):
+            raise RuntimeError("qdrant unavailable")
+
+        storage.delete_by_filter = refuse
+
+        await indexer.delete_document_index(doc.id)
+
+        assert vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == 1
+        assert _doc_freq(vocab, "stubbornterm") == 1
 
     @pytest.mark.asyncio
     async def test_delete_of_an_unindexed_document_is_a_no_op(

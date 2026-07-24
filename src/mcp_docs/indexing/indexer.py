@@ -159,8 +159,12 @@ class DocumentIndexer:
         added_tokens: list[set[str]],
         removed_tokens: list[set[str]],
         net_doc_change: int,
-    ) -> None:
+    ) -> bool:
         """Apply a vocabulary delta, logging rather than raising on failure.
+
+        Returns whether the delta reached the database. Callers must not
+        compensate for a delta that was never applied: inverting one that
+        failed would subtract tokens and a document that were never added.
 
         A delta can only adjust a contribution that already exists:
         ``update_codebase_incremental`` moves the document count with a bare
@@ -176,11 +180,11 @@ class DocumentIndexer:
         scratch and repairs any drift.
         """
         if not added_tokens and not removed_tokens and not net_doc_change:
-            return
+            return True
         try:
             if added_tokens and self.global_vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) <= 0:
                 self.global_vocab.register_codebase(DOCS_CODEBASE_ID, added_tokens)
-                return
+                return True
             self.global_vocab.update_codebase_incremental(
                 DOCS_CODEBASE_ID,
                 added_tokens=added_tokens,
@@ -189,6 +193,8 @@ class DocumentIndexer:
             )
         except Exception as e:
             logger.warning(f"Failed to update the docs vocabulary contribution: {e}")
+            return False
+        return True
 
     async def _revert_vocabulary_update(self, document_id: UUID, registered: set[str]) -> None:
         """Restore the contribution for a document whose indexing failed.
@@ -248,7 +254,7 @@ class DocumentIndexer:
         added = self._token_set([summary, *(chunk.content for chunk in chunks)])
         was_indexed, previous = await self._indexed_token_set(document_id)
 
-        self._update_vocabulary(
+        applied = self._update_vocabulary(
             added_tokens=[added],
             removed_tokens=[previous] if was_indexed else [],
             net_doc_change=0 if was_indexed else 1,
@@ -259,7 +265,8 @@ class DocumentIndexer:
             points = await self._build_points(document, summary, chunks)
             await self._replace_document_points(document_id, points)
         except Exception:
-            await self._revert_vocabulary_update(document_id, added)
+            if applied:
+                await self._revert_vocabulary_update(document_id, added)
             raise
 
         # Update status to indexed
@@ -369,7 +376,9 @@ class DocumentIndexer:
         # Register the vocabulary before Pass 2 vectorizes anything, so every
         # term in this batch is available to every document in it.
         logger.info(f"Registering vocabulary from {len(tokens_by_doc)} documents")
-        await self._register_batch_vocabulary(docs_to_index, tokens_by_doc, force=force)
+        registered = await self._register_batch_vocabulary(
+            docs_to_index, tokens_by_doc, force=force
+        )
 
         # Pass 2: Generate embeddings and create points (summary + chunks)
         total_points = 0
@@ -396,7 +405,8 @@ class DocumentIndexer:
             except Exception as e:
                 logger.error(f"Failed to index document {doc.id}: {e}")
                 extraction_errors.append(f"{doc.filename}: indexing failed - {e}")
-                await self._revert_vocabulary_update(doc.id, tokens_by_doc[doc.id])
+                if registered:
+                    await self._revert_vocabulary_update(doc.id, tokens_by_doc[doc.id])
 
         logger.info(f"Indexed {indexed_count} documents with {total_points} points")
 
@@ -412,8 +422,11 @@ class DocumentIndexer:
         docs_to_index: list[Document],
         tokens_by_doc: dict[UUID, set[str]],
         force: bool,
-    ) -> None:
+    ) -> bool:
         """Fold one ``index_all`` batch into the docs vocabulary contribution.
+
+        Returns whether the contribution was updated, so Pass 2 does not
+        compensate for a delta that never landed.
 
         A force rebuild reindexes the whole corpus, so it replaces the
         contribution outright. Documents whose extraction failed keep their
@@ -442,12 +455,11 @@ class DocumentIndexer:
                     removed.append(previous)
                 else:
                     new_documents += 1
-            self._update_vocabulary(
+            return self._update_vocabulary(
                 added_tokens=added,
                 removed_tokens=removed,
                 net_doc_change=new_documents,
             )
-            return
 
         tokens_per_doc = [tokens_by_doc[doc.id] for doc in docs_to_index if doc.id in tokens_by_doc]
         for doc in docs_to_index:
@@ -461,17 +473,24 @@ class DocumentIndexer:
             self.global_vocab.register_codebase(DOCS_CODEBASE_ID, tokens_per_doc)
         except Exception as e:
             logger.warning(f"Failed to rebuild the docs vocabulary contribution: {e}")
+            return False
+        return True
 
     async def delete_document_index(self, document_id: UUID) -> None:
         """
         Remove a document from the index.
 
+        The vocabulary contribution is retired only once the points are
+        confirmed gone. Subtracting after a failed delete would leave the
+        document searchable while its terms had been written off, which
+        understates the document frequency of everything still in it.
+
         Args:
             document_id: Document UUID to remove
         """
         was_indexed, tokens = await self._indexed_token_set_safe(document_id)
-        await self._delete_document_points(document_id)
-        if was_indexed:
+        deleted = await self._delete_document_points(document_id)
+        if was_indexed and deleted:
             self._update_vocabulary(
                 added_tokens=[],
                 removed_tokens=[tokens],
@@ -637,8 +656,14 @@ class DocumentIndexer:
             logger.debug(f"Could not retrieve indexed hashes (collection may not exist): {e}")
             return set()
 
-    async def _delete_document_points(self, document_id: UUID) -> None:
-        """Delete all points for a document."""
+    async def _delete_document_points(self, document_id: UUID) -> bool:
+        """Delete all points for a document, reporting whether it succeeded.
+
+        Best-effort by design, because most callers would rather continue than
+        fail; but the outcome is returned so a caller that draws a conclusion
+        from the deletion, such as retiring the document's vocabulary
+        contribution, can tell whether the points really went away.
+        """
         # Ensure storage is initialized: this path may run on a cold indexer
         # (e.g. delete_document / remove_document_root right after startup),
         # and without this the missing storage would raise and be swallowed
@@ -652,6 +677,8 @@ class DocumentIndexer:
             )
         except Exception as e:
             logger.warning(f"Failed to delete document points: {e}")
+            return False
+        return True
 
     async def _replace_document_points(
         self,
