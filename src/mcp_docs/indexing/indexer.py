@@ -166,14 +166,6 @@ class DocumentIndexer:
         compensate for a delta that was never applied: inverting one that
         failed would subtract tokens and a document that were never added.
 
-        A delta can only adjust a contribution that already exists:
-        ``update_codebase_incremental`` moves the document count with a bare
-        ``UPDATE``, which does nothing while the docs corpus has no row yet. The
-        first registration therefore goes through ``register_codebase``, which
-        establishes the contribution and its document count in one transaction.
-        Anything already recorded is replaced, which is what an empty
-        contribution wants anyway.
-
         Indexing must not fail because the shared vocabulary database was busy:
         a missed delta degrades ranking, while a raised error would lose the
         document. ``index_all(force=True)`` rebuilds the contribution from
@@ -182,9 +174,6 @@ class DocumentIndexer:
         if not added_tokens and not removed_tokens and not net_doc_change:
             return True
         try:
-            if added_tokens and self.global_vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) <= 0:
-                self.global_vocab.register_codebase(DOCS_CODEBASE_ID, added_tokens)
-                return True
             self.global_vocab.update_codebase_incremental(
                 DOCS_CODEBASE_ID,
                 added_tokens=added_tokens,

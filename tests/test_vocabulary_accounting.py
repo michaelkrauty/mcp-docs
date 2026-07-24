@@ -392,6 +392,65 @@ class TestDeleteDocumentVocabulary:
         assert _doc_freq(vocab, "vanishedterm") == 0
 
     @pytest.mark.asyncio
+    async def test_an_unverifiable_deletion_keeps_the_contribution(
+        self, tmp_path, store, vocab, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """If the read-back fails too, the outcome is genuinely unknown.
+
+        Keeping the contribution is the safer answer: the points may still be
+        searchable, and retiring their terms would understate the document
+        frequency of everything still in them.
+        """
+        from unittest.mock import AsyncMock
+
+        indexer, storage = _make_indexer(store, vocab)
+        monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
+
+        doc = _register(store, tmp_path, "opaque.txt", "opaqueterm")
+        await indexer.index_document(doc.id, "opaqueterm")
+
+        async def refuse(*_args, **_kwargs):
+            raise RuntimeError("qdrant unavailable")
+
+        storage.delete_by_filter = refuse
+        storage.scroll_points = refuse
+
+        await indexer.delete_document_index(doc.id)
+
+        assert vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == 1
+        assert _doc_freq(vocab, "opaqueterm") == 1
+
+    @pytest.mark.asyncio
+    async def test_a_partial_deletion_keeps_the_contribution(
+        self, tmp_path, store, vocab, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Some points gone is not all points gone.
+
+        A surviving chunk is still searchable, so the document's terms stay on
+        the books until the deletion actually completes.
+        """
+        from unittest.mock import AsyncMock
+
+        indexer, storage = _make_indexer(store, vocab)
+        monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
+
+        body = "\n\n".join(f"survivingterm{i} paragraph body text" for i in range(40))
+        doc = _register(store, tmp_path, "partial.txt", body)
+        await indexer.index_document(doc.id, body)
+        assert len(storage.points) > 1, "fixture must produce more than one point"
+
+        async def drop_one_then_fail(*_args, **_kwargs):
+            storage.points.pop(next(iter(storage.points)))
+            raise RuntimeError("connection reset")
+
+        storage.delete_by_filter = drop_one_then_fail
+
+        await indexer.delete_document_index(doc.id)
+
+        assert vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == 1
+        assert _doc_freq(vocab, "survivingterm") == 1
+
+    @pytest.mark.asyncio
     async def test_delete_of_an_unindexed_document_is_a_no_op(
         self, tmp_path, store, vocab, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -11,6 +11,7 @@
 
 ### Changed
 
+- **Pinned vector-core to v1.3.1**, which this change needs. `update_codebase_incremental` there could not establish a codebase's document count, only adjust one that already existed, so a corpus maintained purely by deltas reported no documents forever. Working around that from here would have meant probing the count and falling back to a full registration, which is a check-then-act sequence two server processes can interleave on. It also caps a removal at what the codebase actually contributed and floors counts and frequencies at zero, so a mis-accounted removal can no longer take another codebase's share of a shared term or make every search raise.
 - **A document's registered terms are now taken from the text that is actually stored** (its summary point plus its chunk points) rather than from the raw extracted content. The removal side reads that same text back from the index, and the symmetry is what keeps repeated edits from leaking document frequency. A practical side effect: terms that appear only in the summary line, such as the filename, tags, and title, are now part of the vocabulary and can be matched lexically.
 - Vocabulary maintenance is best-effort and never fails an index operation: a shared-database error is logged, and the drift it causes is repaired by the next force rebuild.
 
