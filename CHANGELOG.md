@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.1] - 2026-07-25
+
+### Changed
+
+- **Pinned vector-core to v1.4.0.** Every Qdrant request now carries the configured `qdrant_operation_timeout` instead of qdrant-client's five second default, which nothing had been overriding. Any request whose duration scales with the size of the working set was subject to that cap regardless of configuration, and exceeding it raised `ResponseHandlingException(ReadTimeout(''))` — an exception with an empty message, naming neither a timeout nor a duration. Indexing a large document set, where a single bulk upsert or a delete filtered on many payload values can exceed five seconds, is where this server was most exposed.
+
 ## [1.2.0] - 2026-07-24
 
 ### Fixed
