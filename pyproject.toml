@@ -1,6 +1,6 @@
 [project]
 name = "mcp-docs"
-version = "1.2.1"
+version = "1.2.2"
 description = "MCP server for document management with vector search"
 readme = "README.md"
 authors = [
@@ -27,10 +27,19 @@ Homepage = "https://github.com/michaelkrauty/mcp-docs"
 Repository = "https://github.com/michaelkrauty/mcp-docs"
 
 [project.optional-dependencies]
+# ocr stays an extra: it is an optional runtime feature consumers opt into,
+# not tooling for working on this package.
 ocr = [
     "pdf2image~=1.16",
     "Pillow~=10.0",
 ]
+
+# A dependency group rather than an extra: `uv sync` installs it by default,
+# so `uv run pytest` finds pytest in the project environment. As an extra it
+# was omitted unless `--extra dev` was passed, and uv then fell through to
+# whatever pytest was on PATH, which runs the suite against a different
+# interpreter and a different installed vector-core than the project pins.
+[dependency-groups]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",

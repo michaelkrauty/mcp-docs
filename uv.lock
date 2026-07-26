@@ -913,7 +913,7 @@ wheels = [
 
 [[package]]
 name = "mcp-docs"
-version = "1.2.1"
+version = "1.2.2"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -929,6 +929,12 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+ocr = [
+    { name = "pdf2image" },
+    { name = "pillow" },
+]
+
+[package.dev-dependencies]
 dev = [
     { name = "hypothesis" },
     { name = "mypy" },
@@ -938,34 +944,34 @@ dev = [
     { name = "pytest-mock" },
     { name = "ruff" },
 ]
-ocr = [
-    { name = "pdf2image" },
-    { name = "pillow" },
-]
 
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.100.0" },
     { name = "markitdown", extras = ["all"], specifier = ">=0.1.5" },
     { name = "mcp", specifier = "~=1.25.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pdf2image", marker = "extra == 'ocr'", specifier = "~=1.16" },
     { name = "pillow", marker = "extra == 'ocr'", specifier = "~=10.0" },
     { name = "pydantic", specifier = "~=2.0" },
     { name = "pydantic-settings", specifier = "~=2.0" },
     { name = "pypdf", specifier = "~=5.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
-    { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.12.0" },
     { name = "python-docx", specifier = "~=1.0" },
     { name = "python-pptx", specifier = "~=1.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
     { name = "striprtf", specifier = "~=0.0.26" },
     { name = "vector-core", git = "https://github.com/michaelkrauty/vector-core?tag=v1.4.0" },
 ]
-provides-extras = ["ocr", "dev"]
+provides-extras = ["ocr"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "hypothesis", specifier = ">=6.100.0" },
+    { name = "mypy", specifier = ">=1.0.0" },
+    { name = "pytest", specifier = ">=8.0.0" },
+    { name = "pytest-asyncio", specifier = ">=0.24.0" },
+    { name = "pytest-cov", specifier = ">=4.0.0" },
+    { name = "pytest-mock", specifier = ">=3.12.0" },
+    { name = "ruff", specifier = ">=0.1.0" },
+]
 
 [[package]]
 name = "mpmath"
