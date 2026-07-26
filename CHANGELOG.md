@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.2] - 2026-07-25
+
+### Changed
+
+- **Development dependencies moved from an extra to a PEP 735 dependency group.** `uv sync` installs a dependency group by default but skips an extra unless it is named, so the project environment was left without pytest and `uv run pytest` silently fell through to whatever pytest was on `PATH`. That interpreter brought its own installed `vector-core`, meaning the suite could report on a different copy of the library than the one this project pins. Running `uv sync` followed by `uv run pytest` now tests this working tree.
+
+  The `ocr` extra is unchanged: it is an optional runtime feature consumers opt into, not tooling for working on this package. Deployments that want a lean environment can pass `uv sync --no-default-groups`.
+
+
 ## [1.2.1] - 2026-07-25
 
 ### Changed
