@@ -55,30 +55,12 @@ EXPECTED_TOOLS = [
     "update_document_tags",
     "delete_document",
     "list_documents",
-    # Processing
-    "get_processing_status",
-    "list_queued_documents",
-    "wait_for_document",
-    "cancel_processing",
-    # Search
-    "search_documents",
-    "keyword_search",
-    "find_similar_documents",
-    "get_document_chunks",
-    # Indexing
-    "index_document",
-    "index_all_documents",
-    # Roots
-    "add_document_root",
-    "list_document_roots",
-    "get_document_root",
-    "remove_document_root",
-    "scan_document_root",
-    "scan_all_roots",
-    # Hashes
-    "lookup_hash",
-    "verify_document_reference",
-    "batch_verify_references",
+    # Filesystem
+    "move_file",
+    "create_directory",
+    "rename_directory",
+    "move_directory",
+    "delete_directory",
     # Glossary
     "add_glossary_entry",
     "lookup_term",
@@ -86,12 +68,30 @@ EXPECTED_TOOLS = [
     "list_glossary",
     "update_glossary_entry",
     "delete_glossary_entry",
-    # Filesystem
-    "move_file",
-    "create_directory",
-    "rename_directory",
-    "move_directory",
-    "delete_directory",
+    # Hashes
+    "lookup_hash",
+    "verify_document_reference",
+    "batch_verify_references",
+    # Indexing
+    "index_document",
+    "index_all_documents",
+    # Processing
+    "get_processing_status",
+    "list_queued_documents",
+    "wait_for_document",
+    "cancel_processing",
+    # Roots
+    "add_document_root",
+    "list_document_roots",
+    "get_document_root",
+    "remove_document_root",
+    "scan_document_root",
+    "scan_all_roots",
+    # Search
+    "search_documents",
+    "keyword_search",
+    "find_similar_documents",
+    "get_document_chunks",
 ]
 
 # Re-export tools for backward compatibility with tests
