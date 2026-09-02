@@ -11,7 +11,7 @@ from vector_core import parse_uuid_or_none
 from vector_core.errors import ErrorCode, error_response
 
 from mcp_docs.app import mcp
-from mcp_docs.singletons import get_document_processor
+from mcp_docs.singletons import get_document_processor, get_document_store
 
 
 @mcp.tool()
@@ -65,6 +65,10 @@ async def wait_for_document(
     uuid = parse_uuid_or_none(document_id)
     if uuid is None:
         return error_response(ErrorCode.INVALID_UUID, f"Invalid document ID: {document_id}")
+
+    store = get_document_store()
+    if store.read(uuid) is None:
+        return error_response(ErrorCode.NOT_FOUND, f"Document not found: {document_id}")
 
     processor = await get_document_processor()
     result = await processor.wait_for(uuid, timeout=timeout)

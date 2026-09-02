@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1] - 2026-09-01
+
+### Fixed
+
+- **`wait_for_document` now rejects an unknown document ID immediately.** A syntactically valid UUID that was absent from the document registry previously entered the processor wait path, created an event that no worker could signal, and returned `TIMEOUT` only after the caller's full timeout elapsed. The tool now returns `NOT_FOUND` before initializing or waiting on the processor, while registered queued, processing, and terminal documents continue through the existing wait path.
+- **Pinned vector-core to v1.4.3 for correct cross-process file locking.** Lock files now retain a stable inode for the lifetime of their namespace, preventing a waiter on an unlinked inode and a new arrival on its replacement from entering the protected section concurrently.
+
 ## [1.3.0] - 2026-08-21
 
 ### Added
