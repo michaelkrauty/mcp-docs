@@ -13,6 +13,10 @@
 - Persist exact embedding input for future migrations, including document summaries and chunks.
 - Mark semantic search inputs as queries so asymmetric embedding models can apply their query-specific formatting.
 
+### Changed
+
+- Pinned vector-core to v1.6.0 for reversible embedding generations, role-aware model formatting and bounded tokenizer-aware inputs.
+
 ## [1.3.2] - 2026-09-04
 
 ### Changed
