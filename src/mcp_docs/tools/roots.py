@@ -17,7 +17,7 @@ from vector_core.errors import ErrorCode, error_response
 
 from mcp_docs.app import mcp
 from mcp_docs.processing import DocumentProcessor
-from mcp_docs.scanning.scanner import ScanResult
+from mcp_docs.scanning.scanner import MAX_ERRORS, ScanResult
 from mcp_docs.singletons import (
     get_document_indexer,
     get_document_processor,
@@ -36,10 +36,17 @@ async def _enqueue_pending(
             if await processor.enqueue(doc_id, file_path) is False:
                 raise RuntimeError("Processing queue rejected the document")
         except Exception as error:
-            logging.getLogger(__name__).exception("Failed to enqueue scanned document %s", doc_id)
+            recorded = False
             for result in results:
-                if file_path.is_relative_to(Path(result.root_path)):
+                if len(result.errors) < MAX_ERRORS and file_path.is_relative_to(
+                    Path(result.root_path)
+                ):
                     result.errors.append(f"{file_path}: enqueue failed: {error}")
+                    recorded = True
+            if recorded:
+                logging.getLogger(__name__).exception(
+                    "Failed to enqueue scanned document %s", doc_id
+                )
 
 
 @mcp.tool()

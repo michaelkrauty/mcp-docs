@@ -603,6 +603,20 @@ async def test_deferred_queue_rejection_is_visible(tmp_path):
     assert "Processing queue rejected" in result.errors[0]
 
 
+async def test_deferred_enqueue_errors_respect_scanner_cap(tmp_path, caplog):
+    from mcp_docs.scanning.scanner import MAX_ERRORS
+    from mcp_docs.tools.roots import _enqueue_pending
+
+    processor = AsyncMock()
+    processor.enqueue.return_value = False
+    result = SimpleNamespace(root_path=str(tmp_path), errors=["prior"] * (MAX_ERRORS - 1))
+    pending = [(uuid4(), tmp_path / str(i)) for i in range(3)]
+    await _enqueue_pending(processor, pending, [result])
+    assert processor.enqueue.await_count == 3
+    assert len(result.errors) == MAX_ERRORS
+    assert len(caplog.records) == 1
+
+
 def test_processing_attempt_survives_metadata_changes(document_store, sample_text):
     doc = document_store.register(sample_text)
     token = document_store.start_processing_attempt(doc.id)
