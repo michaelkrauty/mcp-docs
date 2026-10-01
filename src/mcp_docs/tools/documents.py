@@ -185,18 +185,12 @@ async def update_document_tags(
 
     # Fail before changing source metadata if this process cannot use the index.
     indexer = await get_document_indexer()
-    await indexer.ensure_collection()
-
-    # Update tags (update_tags returns the refreshed document).
-    updated = store.update_tags(uuid, tags)
-
-    # Keep the vector-index payload in sync so tag filters and result metadata
-    # reflect the new tags; otherwise search keeps matching and showing the
-    # document's previous tags until a full reindex.
-    try:
-        await indexer.update_document_tags_in_index(updated)
-    except Exception as e:
-        logger.warning(f"Failed to sync tags to index for {document_id}: {e}")
+    async with indexer.collection_operation(write=True):
+        updated = store.update_tags(uuid, tags)
+        try:
+            await indexer.update_document_tags_in_index(updated)
+        except Exception as e:
+            logger.warning(f"Failed to sync tags to index for {document_id}: {e}")
 
     return updated.to_dict()
 
@@ -220,26 +214,26 @@ async def delete_document_artifacts(
     registry rows while orphaning their vector-index points.
     """
     indexer = await get_document_indexer()
-    await indexer.ensure_collection()
-    sources_marked = 0
-    if content_hash:
+    async with indexer.collection_operation(write=True):
+        sources_marked = 0
+        if content_hash:
+            try:
+                integrity = get_integrity_manager()
+                sources_marked = integrity.mark_document_deleted(content_hash)
+                if sources_marked > 0:
+                    logger.info(
+                        f"Marked {sources_marked} fact sources as deleted "
+                        f"for document {content_hash[:16]}..."
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to mark fact sources as deleted: {e}")
+
         try:
-            integrity = get_integrity_manager()
-            sources_marked = integrity.mark_document_deleted(content_hash)
-            if sources_marked > 0:
-                logger.info(
-                    f"Marked {sources_marked} fact sources as deleted "
-                    f"for document {content_hash[:16]}..."
-                )
+            await indexer.delete_document_index(document_id)
         except Exception as e:
-            logger.warning(f"Failed to mark fact sources as deleted: {e}")
+            logger.warning(f"Failed to delete document index: {e}")
 
-    try:
-        await indexer.delete_document_index(document_id)
-    except Exception as e:
-        logger.warning(f"Failed to delete document index: {e}")
-
-    store.delete(document_id)
+        store.delete(document_id)
     return sources_marked
 
 

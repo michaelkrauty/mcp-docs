@@ -215,7 +215,10 @@ class TestRegisterDocument:
         result = await register_document(path="/nonexistent/file.pdf")
 
         assert "error_code" in result
-        assert "not found" in result["message"].lower() or "does not exist" in result["message"].lower()
+        assert (
+            "not found" in result["message"].lower()
+            or "does not exist" in result["message"].lower()
+        )
 
     @pytest.mark.asyncio
     async def test_register_document_unknown_type(self, temp_dir: Path) -> None:
@@ -239,9 +242,7 @@ class TestRegisterDocument:
         temp_store.close()
 
     @pytest.mark.asyncio
-    async def test_register_moved_duplicate_syncs_index_path(
-        self, temp_dir: Path
-    ) -> None:
+    async def test_register_moved_duplicate_syncs_index_path(self, temp_dir: Path) -> None:
         """Re-registering the same content under a new path updates the registry
         path, but the Qdrant payloads still carry the old path. The index must be
         synced, or search returns the dead old path while get_document returns
@@ -258,14 +259,14 @@ class TestRegisterDocument:
             doc = store.register(path=a, content_hash=compute_file_hash(a))
 
             indexer = AsyncMock()
+            indexer.collection_operation = MagicMock(return_value=AsyncMock())
 
             async def fake_get_indexer():
                 return indexer
 
-            with patch.object(
-                documents_mod, "get_document_store", return_value=store
-            ), patch.object(
-                documents_mod, "get_document_indexer", fake_get_indexer
+            with (
+                patch.object(documents_mod, "get_document_store", return_value=store),
+                patch.object(documents_mod, "get_document_indexer", fake_get_indexer),
             ):
                 result = await documents_mod.register_document(path=str(b))
 
@@ -282,9 +283,7 @@ class TestRegisterDocument:
             store.close()
 
     @pytest.mark.asyncio
-    async def test_register_moved_same_basename_syncs_path_only(
-        self, temp_dir: Path
-    ) -> None:
+    async def test_register_moved_same_basename_syncs_path_only(self, temp_dir: Path) -> None:
         """A relocation that keeps the basename syncs the path payload but not
         the filename payload."""
         import mcp_docs.tools.documents as documents_mod
@@ -303,14 +302,14 @@ class TestRegisterDocument:
             store.register(path=a, content_hash=compute_file_hash(a))
 
             indexer = AsyncMock()
+            indexer.collection_operation = MagicMock(return_value=AsyncMock())
 
             async def fake_get_indexer():
                 return indexer
 
-            with patch.object(
-                documents_mod, "get_document_store", return_value=store
-            ), patch.object(
-                documents_mod, "get_document_indexer", fake_get_indexer
+            with (
+                patch.object(documents_mod, "get_document_store", return_value=store),
+                patch.object(documents_mod, "get_document_indexer", fake_get_indexer),
             ):
                 await documents_mod.register_document(path=str(b))
 
@@ -320,9 +319,7 @@ class TestRegisterDocument:
             store.close()
 
     @pytest.mark.asyncio
-    async def test_register_same_path_does_not_sync_index(
-        self, temp_dir: Path
-    ) -> None:
+    async def test_register_same_path_does_not_sync_index(self, temp_dir: Path) -> None:
         """Re-registering the exact same path leaves the path unchanged, so the
         index is not touched."""
         import mcp_docs.tools.documents as documents_mod
@@ -335,14 +332,14 @@ class TestRegisterDocument:
             store.register(path=a, content_hash=compute_file_hash(a))
 
             indexer = AsyncMock()
+            indexer.collection_operation = MagicMock(return_value=AsyncMock())
 
             async def fake_get_indexer():
                 return indexer
 
-            with patch.object(
-                documents_mod, "get_document_store", return_value=store
-            ), patch.object(
-                documents_mod, "get_document_indexer", fake_get_indexer
+            with (
+                patch.object(documents_mod, "get_document_store", return_value=store),
+                patch.object(documents_mod, "get_document_indexer", fake_get_indexer),
             ):
                 result = await documents_mod.register_document(path=str(a))
 
@@ -435,10 +432,9 @@ class TestUpdateDocumentTags:
                 patch.object(docs_mod, "get_document_indexer") as mock_get_indexer,
             ):
                 indexer = AsyncMock()
+                indexer.collection_operation = MagicMock(return_value=AsyncMock())
                 mock_get_indexer.return_value = indexer
-                result = await docs_mod.update_document_tags(
-                    str(doc.id), ["Alpha", "BETA"]
-                )
+                result = await docs_mod.update_document_tags(str(doc.id), ["Alpha", "BETA"])
 
             assert "error_code" not in result
             assert sorted(result["tags"]) == ["alpha", "beta"]
@@ -482,9 +478,7 @@ class TestRemoveDocumentRootDeletion:
     """
 
     @pytest.mark.asyncio
-    async def test_delete_documents_removes_index_points_and_sources(
-        self, temp_dir: Path
-    ) -> None:
+    async def test_delete_documents_removes_index_points_and_sources(self, temp_dir: Path) -> None:
         import mcp_docs.tools.documents as documents_mod
         import mcp_docs.tools.roots as roots_mod
         from mcp_docs.storage.database import DocumentStore
@@ -497,29 +491,30 @@ class TestRemoveDocumentRootDeletion:
             (root_dir / "b.txt").write_text("b")
             store.add_root(str(root_dir))
             d1 = store.register(
-                path=root_dir / "a.txt", content_hash="hash-a",
+                path=root_dir / "a.txt",
+                content_hash="hash-a",
                 document_root=str(root_dir),
             )
             d2 = store.register(
-                path=root_dir / "b.txt", content_hash="hash-b",
+                path=root_dir / "b.txt",
+                content_hash="hash-b",
                 document_root=str(root_dir),
             )
 
             indexer = AsyncMock()
+            indexer.collection_operation = MagicMock(return_value=AsyncMock())
             integrity = MagicMock()
             integrity.mark_document_deleted.return_value = 1
 
             async def fake_get_indexer():
                 return indexer
 
-            with patch.object(roots_mod, "get_document_store", return_value=store), \
-                 patch.object(documents_mod, "get_document_indexer", fake_get_indexer), \
-                 patch.object(
-                     documents_mod, "get_integrity_manager", return_value=integrity
-                 ):
-                result = await roots_mod.remove_document_root(
-                    str(root_dir), delete_documents=True
-                )
+            with (
+                patch.object(roots_mod, "get_document_store", return_value=store),
+                patch.object(documents_mod, "get_document_indexer", fake_get_indexer),
+                patch.object(documents_mod, "get_integrity_manager", return_value=integrity),
+            ):
+                result = await roots_mod.remove_document_root(str(root_dir), delete_documents=True)
 
             assert result["success"] is True
             # The fix: vector-index points are purged for BOTH documents
@@ -539,9 +534,7 @@ class TestRemoveDocumentRootDeletion:
             store.close()
 
     @pytest.mark.asyncio
-    async def test_without_delete_keeps_documents_and_index(
-        self, temp_dir: Path
-    ) -> None:
+    async def test_without_delete_keeps_documents_and_index(self, temp_dir: Path) -> None:
         import mcp_docs.tools.documents as documents_mod
         import mcp_docs.tools.roots as roots_mod
         from mcp_docs.storage.database import DocumentStore
@@ -553,20 +546,22 @@ class TestRemoveDocumentRootDeletion:
             (root_dir / "a.txt").write_text("a")
             store.add_root(str(root_dir))
             d1 = store.register(
-                path=root_dir / "a.txt", content_hash="hash-a",
+                path=root_dir / "a.txt",
+                content_hash="hash-a",
                 document_root=str(root_dir),
             )
 
             indexer = AsyncMock()
+            indexer.collection_operation = MagicMock(return_value=AsyncMock())
 
             async def fake_get_indexer():
                 return indexer
 
-            with patch.object(roots_mod, "get_document_store", return_value=store), \
-                 patch.object(documents_mod, "get_document_indexer", fake_get_indexer):
-                result = await roots_mod.remove_document_root(
-                    str(root_dir), delete_documents=False
-                )
+            with (
+                patch.object(roots_mod, "get_document_store", return_value=store),
+                patch.object(documents_mod, "get_document_indexer", fake_get_indexer),
+            ):
+                result = await roots_mod.remove_document_root(str(root_dir), delete_documents=False)
 
             assert result["documents_deleted"] is None
             assert result["sources_marked_deleted"] is None
@@ -594,22 +589,24 @@ class TestDeleteDocumentCleanup:
             (root_dir / "a.txt").write_text("a")
             store.add_root(str(root_dir))
             doc = store.register(
-                path=root_dir / "a.txt", content_hash="hash-a",
+                path=root_dir / "a.txt",
+                content_hash="hash-a",
                 document_root=str(root_dir),
             )
 
             indexer = AsyncMock()
+            indexer.collection_operation = MagicMock(return_value=AsyncMock())
             integrity = MagicMock()
             integrity.mark_document_deleted.return_value = 3
 
             async def fake_get_indexer():
                 return indexer
 
-            with patch.object(documents_mod, "get_document_store", return_value=store), \
-                 patch.object(documents_mod, "get_document_indexer", fake_get_indexer), \
-                 patch.object(
-                     documents_mod, "get_integrity_manager", return_value=integrity
-                 ):
+            with (
+                patch.object(documents_mod, "get_document_store", return_value=store),
+                patch.object(documents_mod, "get_document_indexer", fake_get_indexer),
+                patch.object(documents_mod, "get_integrity_manager", return_value=integrity),
+            ):
                 result = await documents_mod.delete_document(str(doc.id))
 
             assert result["success"] is True
@@ -680,7 +677,10 @@ class TestDocumentRoots:
         )
 
         assert "error_code" in result
-        assert "does not exist" in result["message"].lower() or "not found" in result["message"].lower()
+        assert (
+            "does not exist" in result["message"].lower()
+            or "not found" in result["message"].lower()
+        )
 
     @pytest.mark.asyncio
     async def test_list_document_roots(self) -> None:
@@ -786,10 +786,12 @@ class TestBatchVerify:
         """Test batch_verify with non-existent hashes."""
         from mcp_docs.server import batch_verify_references
 
-        result = await batch_verify_references([
-            "sha256:nonexistent1",
-            "sha256:nonexistent2",
-        ])
+        result = await batch_verify_references(
+            [
+                "sha256:nonexistent1",
+                "sha256:nonexistent2",
+            ]
+        )
 
         # Returns list of verification results
         assert isinstance(result, list)
@@ -823,12 +825,8 @@ class TestKeywordSearchValidation:
         without initializing the search engine."""
         from mcp_docs.tools.search import keyword_search
 
-        with patch(
-            "mcp_docs.tools.search.get_search_engine", new=AsyncMock()
-        ) as mock_get_engine:
-            result = await keyword_search(
-                "term", search_filename=False, search_content=False
-            )
+        with patch("mcp_docs.tools.search.get_search_engine", new=AsyncMock()) as mock_get_engine:
+            result = await keyword_search("term", search_filename=False, search_content=False)
 
         assert result["error_code"] == "validation_failed"
         mock_get_engine.assert_not_called()

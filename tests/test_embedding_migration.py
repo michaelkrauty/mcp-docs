@@ -340,7 +340,7 @@ async def test_source_metadata_unchanged_when_generation_unavailable(
 
     doc = document_store.register(sample_text)
     indexer = AsyncMock()
-    indexer.ensure_collection.side_effect = RuntimeError("generation unavailable")
+    indexer.collection_operation = MagicMock(side_effect=RuntimeError("generation unavailable"))
     monkeypatch.setattr(documents, "get_document_store", lambda: document_store)
     monkeypatch.setattr(documents, "get_document_indexer", AsyncMock(return_value=indexer))
     args = {"document_id": str(doc.id)}
@@ -366,3 +366,116 @@ async def test_invalid_document_request_never_initializes_migration(
         args["tags"] = ["tag"]
     await getattr(documents, tool)(**args)
     get_indexer.assert_not_awaited()
+
+
+@pytest.mark.parametrize("tool", ["update_document_tags", "delete_document"])
+async def test_source_and_index_mutations_share_generation_lock(
+    tool, document_store, sample_text, monkeypatch
+):
+    from mcp_docs.tools import documents
+
+    doc = document_store.register(sample_text)
+    storage, embedder, vocab = components()
+    indexer = DocumentIndexer(document_store, storage, embedder, vocab, "documents")
+    lock = asyncio.Lock()
+    updating = asyncio.Event()
+    migration_attempted = asyncio.Event()
+    observed = []
+
+    @asynccontextmanager
+    async def held(storage, logical_name):
+        async with lock:
+            yield
+
+    monkeypatch.setattr("mcp_docs.embedding.embedding_collection_lock", held)
+    monkeypatch.setattr(
+        "mcp_docs.embedding.ensure_embedding_collection",
+        AsyncMock(return_value=SimpleNamespace(physical_name="documents_generation_new")),
+    )
+    monkeypatch.setattr(documents, "get_document_store", lambda: document_store)
+    monkeypatch.setattr(documents, "get_document_indexer", AsyncMock(return_value=indexer))
+    monkeypatch.setattr(documents, "get_integrity_manager", MagicMock())
+
+    async def write_index(*args, **kwargs):
+        assert lock.locked()
+        updating.set()
+        await migration_attempted.wait()
+        assert observed == []  # Migration cannot snapshot half the mutation.
+
+    if tool == "delete_document":
+        storage.delete_by_filter.side_effect = write_index
+    else:
+        storage.update_payload.side_effect = write_index
+
+    async def migrate():
+        await updating.wait()
+        migration_attempted.set()
+        async with lock:
+            observed.append(document_store.read(doc.id))
+
+    migration = asyncio.create_task(migrate())
+    if tool == "delete_document":
+        await documents.delete_document(str(doc.id))
+    else:
+        await documents.update_document_tags(str(doc.id), ["updated"])
+    await migration
+    assert observed == [None] if tool == "delete_document" else observed[0].tags == ["updated"]
+
+
+@pytest.mark.parametrize("tool", ["move_file", "rename_directory", "move_directory"])
+async def test_filesystem_and_registry_move_under_generation_lock(
+    tool, document_store, tmp_path, monkeypatch
+):
+    from mcp_docs.tools import filesystem
+
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    source = source_dir / "document.txt"
+    source.write_text("Document content")
+    document_store.add_root(str(tmp_path))
+    doc = document_store.register(source)
+    storage, embedder, vocab = components()
+    storage.scroll_points.return_value = [{"path": str(source)}]
+    indexer = DocumentIndexer(document_store, storage, embedder, vocab, "documents")
+    held = False
+
+    @asynccontextmanager
+    async def lock(storage, logical_name):
+        nonlocal held
+        held = True
+        try:
+            yield
+        finally:
+            held = False
+
+    monkeypatch.setattr("mcp_docs.embedding.embedding_collection_lock", lock)
+    monkeypatch.setattr(
+        "mcp_docs.embedding.ensure_embedding_collection",
+        AsyncMock(return_value=SimpleNamespace(physical_name="documents_generation_new")),
+    )
+    monkeypatch.setattr(filesystem, "get_document_store", lambda: document_store)
+    monkeypatch.setattr(filesystem, "get_document_indexer", AsyncMock(return_value=indexer))
+    monkeypatch.setattr(filesystem, "get_document_processor", AsyncMock(return_value=AsyncMock()))
+    move = filesystem.shutil.move
+
+    def checked_move(*args):
+        assert held
+        return move(*args)
+
+    monkeypatch.setattr(filesystem.shutil, "move", checked_move)
+
+    async def checked_update(*args, **kwargs):
+        assert held
+        assert document_store.read(doc.id).path != str(source)
+        assert not source.exists()
+
+    storage.update_payload.side_effect = checked_update
+    if tool == "move_file":
+        result = await filesystem.move_file(str(source), str(tmp_path / "document.txt"))
+    elif tool == "rename_directory":
+        result = await filesystem.rename_directory(str(source_dir), "renamed")
+    else:
+        result = await filesystem.move_directory(str(source_dir), str(tmp_path / "moved"))
+    assert result["success"] is True
+    storage.update_payload.assert_awaited_once()
+    assert not held
