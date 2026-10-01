@@ -86,9 +86,7 @@ async def register_document(
         if old_path is not None and document.path != old_path:
             try:
                 indexer = await get_document_indexer()
-                await indexer.update_document_path_in_index(
-                    document.id, document.path
-                )
+                await indexer.update_document_path_in_index(document.id, document.path)
                 if old_filename != document.filename:
                     await indexer.update_document_filename_in_index(document)
             except Exception as e:
@@ -185,6 +183,10 @@ async def update_document_tags(
     if document is None:
         return error_response(ErrorCode.NOT_FOUND, f"Document not found: {document_id}")
 
+    # Fail before changing source metadata if this process cannot use the index.
+    indexer = await get_document_indexer()
+    await indexer.ensure_collection()
+
     # Update tags (update_tags returns the refreshed document).
     updated = store.update_tags(uuid, tags)
 
@@ -192,7 +194,6 @@ async def update_document_tags(
     # reflect the new tags; otherwise search keeps matching and showing the
     # document's previous tags until a full reindex.
     try:
-        indexer = await get_document_indexer()
         await indexer.update_document_tags_in_index(updated)
     except Exception as e:
         logger.warning(f"Failed to sync tags to index for {document_id}: {e}")
@@ -218,6 +219,8 @@ async def delete_document_artifacts(
     clean up identically; a prior divergence left remove_document_root deleting
     registry rows while orphaning their vector-index points.
     """
+    indexer = await get_document_indexer()
+    await indexer.ensure_collection()
     sources_marked = 0
     if content_hash:
         try:
@@ -232,7 +235,6 @@ async def delete_document_artifacts(
             logger.warning(f"Failed to mark fact sources as deleted: {e}")
 
     try:
-        indexer = await get_document_indexer()
         await indexer.delete_document_index(document_id)
     except Exception as e:
         logger.warning(f"Failed to delete document index: {e}")

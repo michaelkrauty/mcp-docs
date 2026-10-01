@@ -7,6 +7,8 @@ import pytest
 
 from mcp_docs.search.engine import DocumentSearchEngine, SearchResult
 
+pytestmark = pytest.mark.usefixtures("embedding_generation")
+
 
 class TestSearchResult:
     """Tests for SearchResult dataclass."""
@@ -248,9 +250,36 @@ class TestDocumentSearchEngineGetChunks:
 
         # Return chunks out of order
         mock_storage.scroll_points.return_value = [
-            {"document_id": str(doc_id), "chunk_index": 2, "type": "doc_chunk", "content": "C", "filename": "f", "path": "p", "doc_type": "t", "tags": []},
-            {"document_id": str(doc_id), "chunk_index": 0, "type": "doc_chunk", "content": "A", "filename": "f", "path": "p", "doc_type": "t", "tags": []},
-            {"document_id": str(doc_id), "chunk_index": 1, "type": "doc_chunk", "content": "B", "filename": "f", "path": "p", "doc_type": "t", "tags": []},
+            {
+                "document_id": str(doc_id),
+                "chunk_index": 2,
+                "type": "doc_chunk",
+                "content": "C",
+                "filename": "f",
+                "path": "p",
+                "doc_type": "t",
+                "tags": [],
+            },
+            {
+                "document_id": str(doc_id),
+                "chunk_index": 0,
+                "type": "doc_chunk",
+                "content": "A",
+                "filename": "f",
+                "path": "p",
+                "doc_type": "t",
+                "tags": [],
+            },
+            {
+                "document_id": str(doc_id),
+                "chunk_index": 1,
+                "type": "doc_chunk",
+                "content": "B",
+                "filename": "f",
+                "path": "p",
+                "doc_type": "t",
+                "tags": [],
+            },
         ]
 
         engine.storage = mock_storage
@@ -340,9 +369,7 @@ class TestFindSimilarDocumentsTool:
 
         engine = AsyncMock()
         engine.find_similar.return_value = []
-        with patch(
-            "mcp_docs.tools.search.get_search_engine", new=AsyncMock(return_value=engine)
-        ):
+        with patch("mcp_docs.tools.search.get_search_engine", new=AsyncMock(return_value=engine)):
             result = await find_similar_documents(str(uuid4()))
         assert result == []
 
@@ -355,9 +382,7 @@ class TestFindSimilarDocumentsTool:
 
         engine = AsyncMock()
         engine.find_similar.side_effect = DocumentNotFoundError("nope")
-        with patch(
-            "mcp_docs.tools.search.get_search_engine", new=AsyncMock(return_value=engine)
-        ):
+        with patch("mcp_docs.tools.search.get_search_engine", new=AsyncMock(return_value=engine)):
             result = await find_similar_documents(str(uuid4()))
         assert isinstance(result, dict)
         assert result["error_code"] == ErrorCode.NOT_FOUND.value
@@ -367,14 +392,19 @@ class TestFindSimilarDocumentsTool:
         from mcp_docs.tools.search import find_similar_documents
 
         neighbor = SearchResult(
-            document_id=uuid4(), score=0.9, content="c", point_type="document",
-            filename="n.txt", path="/n.txt", title=None, doc_type="txt", tags=[],
+            document_id=uuid4(),
+            score=0.9,
+            content="c",
+            point_type="document",
+            filename="n.txt",
+            path="/n.txt",
+            title=None,
+            doc_type="txt",
+            tags=[],
         )
         engine = AsyncMock()
         engine.find_similar.return_value = [neighbor]
-        with patch(
-            "mcp_docs.tools.search.get_search_engine", new=AsyncMock(return_value=engine)
-        ):
+        with patch("mcp_docs.tools.search.get_search_engine", new=AsyncMock(return_value=engine)):
             result = await find_similar_documents(str(uuid4()))
         assert isinstance(result, list)
         assert result[0]["filename"] == "n.txt"
@@ -414,6 +444,7 @@ class TestKeywordSearchPagination:
         mock_client.scroll.side_effect = [(page1, "offset1"), (page2, None)]
         engine = AsyncMock()
         engine.storage.get_client.return_value = mock_client
+        engine.collection_operation = MagicMock(return_value=AsyncMock())
 
         with patch(
             "mcp_docs.tools.search.get_search_engine",
@@ -439,6 +470,7 @@ class TestKeywordSearchPagination:
         mock_client.scroll.side_effect = [(page1, "offset1"), ([], None)]
         engine = AsyncMock()
         engine.storage.get_client.return_value = mock_client
+        engine.collection_operation = MagicMock(return_value=AsyncMock())
 
         with patch(
             "mcp_docs.tools.search.get_search_engine",

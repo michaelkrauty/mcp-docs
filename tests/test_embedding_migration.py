@@ -1,0 +1,368 @@
+"""Document operations must never query or mutate an incompatible generation."""
+
+import asyncio
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
+
+import pytest
+
+from mcp_docs.embedding import document_embedding_text
+from mcp_docs.indexing.indexer import DocumentIndexer
+from mcp_docs.models import ExtractionStatus
+from mcp_docs.search.engine import DocumentSearchEngine
+
+
+@pytest.fixture
+def routing(monkeypatch):
+    events = []
+
+    @asynccontextmanager
+    async def lock(storage, logical_name):
+        assert logical_name == "documents"
+        events.append("locked")
+        try:
+            yield
+        finally:
+            events.append("unlocked")
+
+    async def ensure(storage, logical_name, embedder, resolver, *, lock_held=False):
+        assert logical_name == "documents"
+        assert resolver is document_embedding_text
+        if lock_held:
+            assert events[-1] == "locked"
+        events.append("resolved")
+        return SimpleNamespace(physical_name="documents_generation_new")
+
+    ensure_mock = AsyncMock(side_effect=ensure)
+    monkeypatch.setattr("mcp_docs.embedding.ensure_embedding_collection", ensure_mock)
+    monkeypatch.setattr("mcp_docs.embedding.embedding_collection_lock", lock)
+    return events, ensure_mock
+
+
+def components():
+    storage = AsyncMock()
+    storage.scroll_points.return_value = []
+    embedder = AsyncMock()
+    embedder.embed_batch.side_effect = lambda texts: [[0.1, 0.2] for _ in texts]
+    embedder.embed_single_cached.return_value = [0.1, 0.2]
+    vocab = MagicMock()
+    vocab.tokenize.return_value = ["example"]
+    vocab.vectorize_document.return_value = SimpleNamespace(indices=[1], values=[1.0])
+    return storage, embedder, vocab
+
+
+async def test_child_task_does_not_reuse_parent_generation_after_exit(routing):
+    events, ensure = routing
+    storage, embedder, vocab = components()
+    indexer = DocumentIndexer(MagicMock(), storage, embedder, vocab, "documents")
+    parent_finished = asyncio.Event()
+
+    async def child_write():
+        await parent_finished.wait()
+        assert indexer.collection_name == "documents"
+        await indexer.delete_document_index(uuid4())
+
+    async with indexer.collection_operation(write=True):
+        child = asyncio.create_task(child_write())
+    parent_finished.set()
+    await child
+    assert ensure.await_count == 2
+    assert events == ["locked", "resolved", "unlocked"] * 2
+    assert storage.delete_by_filter.await_args.args[0] == "documents_generation_new"
+
+
+async def test_search_resolves_generation_before_embedding(routing):
+    events, ensure = routing
+    storage, embedder, vocab = components()
+    engine = DocumentSearchEngine(storage, embedder, vocab, "documents")
+    engine._searcher = AsyncMock()
+    engine._searcher.search.return_value = []
+
+    async def embed(query, *, role):
+        assert role == "query"
+        assert events == ["resolved"]
+        return [0.1, 0.2]
+
+    embedder.embed_single_cached.side_effect = embed
+    assert await engine.search("example") == []
+    assert engine._searcher.search.await_args.kwargs["collection"] == "documents_generation_new"
+    embedder.embed_single_cached.assert_awaited_once_with("example", role="query")
+    assert engine.collection_name == "documents"
+    ensure.assert_awaited_once()
+
+
+async def test_migration_failure_prevents_search(monkeypatch):
+    storage, embedder, vocab = components()
+    engine = DocumentSearchEngine(storage, embedder, vocab, "documents")
+    engine._searcher = AsyncMock()
+    monkeypatch.setattr(
+        "mcp_docs.embedding.ensure_embedding_collection",
+        AsyncMock(side_effect=RuntimeError("incomplete migration")),
+    )
+    with pytest.raises(RuntimeError, match="incomplete migration"):
+        await engine.search("example")
+    embedder.embed_single_cached.assert_not_awaited()
+    engine._searcher.search.assert_not_awaited()
+    assert engine.collection_name == "documents"
+
+
+async def test_incremental_index_migrates_indexed_missing_source(
+    routing, document_store, sample_text
+):
+    events, ensure = routing
+    doc = document_store.register(sample_text)
+    document_store.update(doc.id, extraction_status=ExtractionStatus.INDEXED)
+    before = document_store.read(doc.id)
+    sample_text.unlink()
+    storage, embedder, vocab = components()
+    indexer = DocumentIndexer(document_store, storage, embedder, vocab, "documents")
+
+    assert await indexer.index_all() == {"indexed": 0, "total": 1}
+    ensure.assert_awaited_once()
+    assert document_store.read(doc.id) == before
+    assert events == ["locked", "resolved", "unlocked"]
+    vocab.register_codebase.assert_not_called()
+    vocab.update_codebase_incremental.assert_not_called()
+    embedder.embed_batch.assert_not_awaited()
+
+
+async def test_index_document_persists_input_and_uses_one_locked_generation(
+    routing, document_store, sample_text
+):
+    events, ensure = routing
+    doc = document_store.register(sample_text)
+    storage, embedder, vocab = components()
+    indexer = DocumentIndexer(document_store, storage, embedder, vocab, "documents")
+
+    async def upsert(collection, points):
+        assert events == ["locked", "resolved"]
+        assert collection == "documents_generation_new"
+        assert [p.payload["embedding_text"] for p in points] == [
+            doc.filename,
+            "Previously extracted text",
+        ]
+
+    storage.upsert_batch.side_effect = upsert
+    assert await indexer.index_document(doc.id, "Previously extracted text") == 2
+    assert storage.delete_by_filter.await_args.args[0] == "documents_generation_new"
+    ensure.assert_awaited_once()
+    assert events == ["locked", "resolved", "unlocked"]
+    assert indexer.collection_name == "documents"
+    embedder.embed_batch.assert_awaited_once_with([doc.filename, "Previously extracted text"])
+
+
+@pytest.mark.parametrize(
+    "method", ["update_document_tags_in_index", "update_document_filename_in_index"]
+)
+async def test_summary_refresh_binds_generation(method, routing, document_store, sample_text):
+    doc = document_store.register(sample_text)
+    doc = document_store.update(doc.id, extraction_status=ExtractionStatus.INDEXED)
+    storage, embedder, vocab = components()
+    indexer = DocumentIndexer(document_store, storage, embedder, vocab, "documents")
+    await getattr(indexer, method)(doc)
+    assert storage.update_payload.await_args.args[0] == "documents_generation_new"
+    collection, points = storage.upsert_batch.await_args.args
+    assert collection == "documents_generation_new"
+    assert points[0].payload["embedding_text"] == points[0].payload["content"]
+
+
+async def test_delete_and_chunk_reads_bind_generation(routing):
+    storage, embedder, vocab = components()
+    indexer = DocumentIndexer(MagicMock(), storage, embedder, vocab, "documents")
+    await indexer.delete_document_index(uuid4())
+    assert storage.delete_by_filter.await_args.args[0] == "documents_generation_new"
+    engine = DocumentSearchEngine(storage, embedder, vocab, "documents")
+    assert await engine.get_document_chunks(uuid4()) == []
+    assert storage.scroll_points.await_args.args[0] == "documents_generation_new"
+
+
+async def test_similarity_freezes_target_for_vector_read_and_query(routing):
+    storage, embedder, vocab = components()
+    storage.scroll_points.return_value = [{"document_id": str(uuid4())}]
+    storage.get_client.return_value.scroll.return_value = (
+        [SimpleNamespace(vector={"dense": [0.1, 0.2]})],
+        None,
+    )
+    storage.query_dense.return_value = []
+    engine = DocumentSearchEngine(storage, embedder, vocab, "documents")
+    assert await engine.find_similar(uuid4()) == []
+    assert storage.get_client.return_value.scroll.await_args.args[0] == "documents_generation_new"
+    assert storage.query_dense.await_args.kwargs["collection"] == "documents_generation_new"
+
+
+@pytest.mark.parametrize("kind", ["document", "doc_chunk"])
+async def test_document_text_uses_persisted_content_without_source(kind):
+    assert (
+        await document_embedding_text(
+            {"type": kind, "content": "Full stored content", "path": "/missing/source"}
+        )
+        == "Full stored content"
+    )
+
+
+async def test_shared_payload_resolves_via_authoritative_store(monkeypatch):
+    resolver = AsyncMock(return_value="Full untruncated glossary definition")
+    monkeypatch.setattr("mcp_docs.embedding.resolve_shared_embedding_text", resolver)
+    payload = {"type": "glossary", "glossary_id": str(uuid4())}
+    assert await document_embedding_text(payload) == "Full untruncated glossary definition"
+    resolver.assert_awaited_once_with(payload)
+
+
+@pytest.mark.parametrize(
+    "payload, expected",
+    [
+        ({"type": "note", "title": "Retained note", "tags": ["tag"]}, "Retained note\nTags: tag"),
+        ({"type": "chunk", "note_id": "note", "content": "Full note chunk"}, "Full note chunk"),
+        ({"type": "fact", "content": "Retained fact"}, "Retained fact"),
+    ],
+)
+async def test_docs_first_shared_legacy_payloads(payload, expected):
+    assert await document_embedding_text(payload) == expected
+
+
+async def test_docs_first_glossary_uses_full_definition(tmp_path, monkeypatch):
+    from vector_core.glossary.store import GlossaryStore
+    from vector_core.settings import settings
+    from vector_core.utils.hashing import hash_content
+
+    monkeypatch.setattr(settings, "shared_data_dir", tmp_path)
+    store = GlossaryStore()
+    definition = "Complete definition " * 150
+    try:
+        entry = store.create("TERM", "Expansion", definition)
+        payload = {
+            "type": "glossary",
+            "glossary_id": str(entry.id),
+            "term": entry.term,
+            "expansion": entry.expansion,
+            "definition": definition[:2000],
+            "domain": entry.domain,
+            "aliases": entry.aliases,
+            "entry_hash": hash_content(f"{entry.term}|{entry.expansion}|{definition}"),
+        }
+        assert await document_embedding_text(payload) == f"TERM Expansion {definition}"
+    finally:
+        store.close()
+
+
+async def test_real_migration_retains_unavailable_document_and_index_state(
+    document_store, sample_text, tmp_path, monkeypatch
+):
+    from qdrant_client import AsyncQdrantClient
+    from qdrant_client.models import PointStruct, SparseVector
+    from vector_core import EmbeddingClient, QdrantStorage
+    from vector_core.settings import settings
+    from vector_core.storage.embedding_migration import (
+        EmbeddingMigrationError,
+        active_embedding_collection,
+    )
+
+    monkeypatch.setattr(settings, "cache_dir", tmp_path / "cache")
+    doc = document_store.register(sample_text)
+    document_store.update(doc.id, extraction_status=ExtractionStatus.INDEXED)
+    before = document_store.read(doc.id)
+    sample_text.unlink()
+    storage = QdrantStorage(url="http://isolated.invalid", embedding_dim=2)
+    storage._client = AsyncQdrantClient(location=":memory:")
+    embedder = EmbeddingClient(model="replacement", dim=3)
+    embedder.embed_single = AsyncMock(return_value=[1.0, 0.0, 0.0])
+    embedder.embed_all = AsyncMock(
+        side_effect=lambda texts, **kwargs: [[1.0, 0.0, 0.0] for _ in texts]
+    )
+    vocab = MagicMock()
+    try:
+        await storage.create_collection("documents", dense_dim=2)
+        raw = await storage.get_client()
+        points = [
+            PointStruct(
+                id=number,
+                vector={"dense": [1.0, 0.0], "sparse": SparseVector(indices=[1], values=[1.0])},
+                payload={
+                    "type": kind,
+                    "document_id": str(doc.id),
+                    "content": content,
+                    "doc_hash": "unchanged",
+                    "content_hash": doc.content_hash,
+                    "path": str(sample_text),
+                    "chunk_index": 0,
+                },
+            )
+            for number, kind, content in [
+                (1, "document", "Retained summary"),
+                (2, "doc_chunk", "Retained full chunk"),
+            ]
+        ]
+        await raw.upsert("documents", points, wait=True)
+        original, _ = await raw.scroll("documents", with_vectors=True)
+        indexer = DocumentIndexer(document_store, storage, embedder, vocab, "documents")
+        assert await indexer.index_all() == {"indexed": 0, "total": 1}
+        target = await active_embedding_collection(storage, "documents")
+        assert target != "documents"
+        migrated, _ = await raw.scroll(target, with_vectors=True)
+        assert {p.id for p in migrated} == {0, 1, 2}
+        assert document_store.read(doc.id) == before
+        assert (await raw.scroll("documents", with_vectors=True))[0] == original
+        embedder.embed_all.assert_awaited_once_with(
+            ["Retained summary", "Retained full chunk"], role="document"
+        )
+        for point in migrated:
+            if point.id:
+                assert len(point.vector["dense"]) == 3
+                assert point.vector["sparse"] == original[0].vector["sparse"]
+                assert point.payload["doc_hash"] == "unchanged"
+
+        # A second configured identity builds from the current complete generation.
+        newer = EmbeddingClient(model="same-dimension-change", dim=3)
+        newer.embed_single = AsyncMock(return_value=[0.0, 1.0, 0.0])
+        newer.embed_all = AsyncMock(
+            side_effect=lambda texts, **kwargs: [[0.0, 1.0, 0.0] for _ in texts]
+        )
+        engine = DocumentSearchEngine(storage, newer, vocab, "documents")
+        assert len(await engine.get_document_chunks(doc.id)) == 1
+        assert await active_embedding_collection(storage, "documents") != target
+        with pytest.raises(EmbeddingMigrationError, match="superseded"):
+            await indexer.delete_document_index(doc.id)
+        assert document_store.read(doc.id) == before
+        vocab.update_codebase_incremental.assert_not_called()
+        await newer.close()
+    finally:
+        await embedder.close()
+        await storage.close()
+
+
+@pytest.mark.parametrize("tool", ["update_document_tags", "delete_document"])
+async def test_source_metadata_unchanged_when_generation_unavailable(
+    tool, document_store, sample_text, monkeypatch
+):
+    from mcp_docs.tools import documents
+
+    doc = document_store.register(sample_text)
+    indexer = AsyncMock()
+    indexer.ensure_collection.side_effect = RuntimeError("generation unavailable")
+    monkeypatch.setattr(documents, "get_document_store", lambda: document_store)
+    monkeypatch.setattr(documents, "get_document_indexer", AsyncMock(return_value=indexer))
+    args = {"document_id": str(doc.id)}
+    if tool == "update_document_tags":
+        args["tags"] = ["changed"]
+    with pytest.raises(RuntimeError, match="generation unavailable"):
+        await getattr(documents, tool)(**args)
+    assert document_store.read(doc.id) == doc
+
+
+@pytest.mark.parametrize("tool", ["update_document_tags", "delete_document"])
+@pytest.mark.parametrize("document_id", ["invalid-uuid", str(uuid4())])
+async def test_invalid_document_request_never_initializes_migration(
+    tool, document_id, document_store, monkeypatch
+):
+    from mcp_docs.tools import documents
+
+    get_indexer = AsyncMock()
+    monkeypatch.setattr(documents, "get_document_store", lambda: document_store)
+    monkeypatch.setattr(documents, "get_document_indexer", get_indexer)
+    args = {"document_id": document_id}
+    if tool == "update_document_tags":
+        args["tags"] = ["tag"]
+    await getattr(documents, tool)(**args)
+    get_indexer.assert_not_awaited()

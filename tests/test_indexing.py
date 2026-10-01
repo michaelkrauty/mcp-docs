@@ -6,6 +6,8 @@ import pytest
 
 from mcp_docs.indexing.chunker import DocumentChunker, chunk_document
 
+pytestmark = pytest.mark.usefixtures("embedding_generation")
+
 
 class TestDocumentChunker:
     """Tests for DocumentChunker."""
@@ -145,10 +147,12 @@ class TestDocumentIndexerScrollPoints:
         # Create mock dependencies
         mock_store = MagicMock(spec=DocumentStore)
         mock_storage = MagicMock()
-        mock_storage.scroll_points = AsyncMock(return_value=[
-            {"doc_hash": "abc123"},
-            {"doc_hash": "def456"},
-        ])
+        mock_storage.scroll_points = AsyncMock(
+            return_value=[
+                {"doc_hash": "abc123"},
+                {"doc_hash": "def456"},
+            ]
+        )
 
         # Create indexer with mocks
         indexer = DocumentIndexer(
@@ -289,9 +293,7 @@ class TestDocumentIndexerAtomicReindex:
             )
             fake_storage.upsert_batch = AsyncMock()
             fake_embedder = MagicMock()
-            fake_embedder.embed_batch = AsyncMock(
-                side_effect=RuntimeError("embedding unavailable")
-            )
+            fake_embedder.embed_batch = AsyncMock(side_effect=RuntimeError("embedding unavailable"))
             fake_vocab = MagicMock()
             fake_vocab.get_codebase_doc_count.return_value = 1
             indexer = DocumentIndexer(
@@ -396,9 +398,7 @@ class TestDocumentIndexerAtomicReindex:
                 collection_name="test",
             )
             monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
-            monkeypatch.setattr(
-                indexer, "_build_points", AsyncMock(return_value=[])
-            )
+            monkeypatch.setattr(indexer, "_build_points", AsyncMock(return_value=[]))
 
             with pytest.raises(RuntimeError, match="produced no points"):
                 await indexer.index_document(doc.id, "content")
@@ -420,9 +420,7 @@ class TestDocumentIndexerAtomicReindex:
 
         fake_storage = MagicMock()
         fake_storage.scroll_points = AsyncMock(return_value=[])
-        fake_storage.delete_by_filter = AsyncMock(
-            side_effect=RuntimeError("delete unavailable")
-        )
+        fake_storage.delete_by_filter = AsyncMock(side_effect=RuntimeError("delete unavailable"))
         fake_storage.upsert_batch = AsyncMock()
         indexer = DocumentIndexer(
             document_store=MagicMock(spec=DocumentStore),
@@ -474,9 +472,7 @@ class TestDocumentIndexerTagSync:
                 global_vocab=MagicMock(),
                 collection_name="test_collection",
             )
-            monkeypatch.setattr(
-                indexer, "_create_point", MagicMock(return_value="SUMMARY_POINT")
-            )
+            monkeypatch.setattr(indexer, "_create_point", MagicMock(return_value="SUMMARY_POINT"))
 
             await indexer.update_document_tags_in_index(doc)
 
@@ -489,16 +485,12 @@ class TestDocumentIndexerTagSync:
             fake_embedder.embed_batch.assert_awaited_once()
             summary_text = fake_embedder.embed_batch.await_args.args[0][0]
             assert "alpha" in summary_text and "beta" in summary_text
-            fake_storage.upsert_batch.assert_awaited_once_with(
-                "test_collection", ["SUMMARY_POINT"]
-            )
+            fake_storage.upsert_batch.assert_awaited_once_with("test_collection", ["SUMMARY_POINT"])
         finally:
             store.close()
 
     @pytest.mark.asyncio
-    async def test_unindexed_document_only_updates_payload(
-        self, tmp_path
-    ) -> None:
+    async def test_unindexed_document_only_updates_payload(self, tmp_path) -> None:
         from unittest.mock import AsyncMock, MagicMock
 
         from mcp_docs.indexing.indexer import DocumentIndexer
@@ -583,9 +575,7 @@ class TestIndexAllCompleteCorpus:
         mock_store.query.return_value = list(docs[:50])
         mock_store.count.return_value = n
 
-        indexer = DocumentIndexer(
-            document_store=mock_store, collection_name="test_collection"
-        )
+        indexer = DocumentIndexer(document_store=mock_store, collection_name="test_collection")
         monkeypatch.setattr(indexer, "_ensure_components", AsyncMock())
         monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
         # No already-indexed hashes, so every enumerated doc survives the
@@ -594,9 +584,7 @@ class TestIndexAllCompleteCorpus:
 
         result = await indexer.index_all(force=False)
 
-        mock_store.iter_all.assert_called_once_with(
-            extraction_status=ExtractionStatus.EXTRACTED
-        )
+        mock_store.iter_all.assert_called_once_with(extraction_status=ExtractionStatus.EXTRACTED)
         mock_store.query.assert_not_called()
         # One "file not found" error per enumerated document: all 60, not 50.
         assert len(result["errors"]) == n
@@ -621,9 +609,7 @@ class TestIndexAllCompleteCorpus:
         mock_store.query.return_value = list(docs[:50])
         mock_store.count.return_value = n
 
-        indexer = DocumentIndexer(
-            document_store=mock_store, collection_name="test_collection"
-        )
+        indexer = DocumentIndexer(document_store=mock_store, collection_name="test_collection")
         monkeypatch.setattr(indexer, "_ensure_components", AsyncMock())
         monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
 
@@ -703,9 +689,7 @@ class TestIndexAllForceRebuild:
             monkeypatch.setattr(
                 indexer, "_delete_document_points", AsyncMock(side_effect=record_delete)
             )
-            monkeypatch.setattr(
-                indexer, "_build_points", AsyncMock(side_effect=record_create)
-            )
+            monkeypatch.setattr(indexer, "_build_points", AsyncMock(side_effect=record_create))
 
             result = await indexer.index_all(force=True)
 
@@ -760,9 +744,7 @@ class TestIndexAllForceRebuild:
             result = await indexer.index_all(force=True)
 
             assert result["indexed"] == 0
-            assert result["errors"] == [
-                "document.txt: indexing failed - embedding unavailable"
-            ]
+            assert result["errors"] == ["document.txt: indexing failed - embedding unavailable"]
             assert stored_points == {"summary-old", "chunk-old-0"}
             fake_storage.delete_by_filter.assert_not_awaited()
             fake_storage.upsert_batch.assert_not_awaited()
@@ -824,13 +806,9 @@ class TestIndexAllForceRebuild:
             )
             monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
             monkeypatch.setattr(indexer, "_delete_document_points", AsyncMock())
-            monkeypatch.setattr(
-                indexer, "_build_points", AsyncMock(return_value=["POINT"])
-            )
+            monkeypatch.setattr(indexer, "_build_points", AsyncMock(return_value=["POINT"]))
             # No already-indexed hashes, so EXTRACTED docs survive the filter.
-            monkeypatch.setattr(
-                indexer, "_get_indexed_hashes", AsyncMock(return_value=set())
-            )
+            monkeypatch.setattr(indexer, "_get_indexed_hashes", AsyncMock(return_value=set()))
 
             result = await indexer.index_all(force=False)
 
@@ -847,9 +825,7 @@ class TestDocumentIndexerEmptyContent:
     point is indexed."""
 
     @pytest.mark.asyncio
-    async def test_empty_content_indexes_summary_only(
-        self, tmp_path, monkeypatch
-    ) -> None:
+    async def test_empty_content_indexes_summary_only(self, tmp_path, monkeypatch) -> None:
         from unittest.mock import AsyncMock, MagicMock
 
         from mcp_docs.indexing.indexer import DocumentIndexer
@@ -874,9 +850,7 @@ class TestDocumentIndexerEmptyContent:
                 global_vocab=MagicMock(),
                 collection_name="test",
             )
-            monkeypatch.setattr(
-                indexer, "_create_point", MagicMock(return_value="POINT")
-            )
+            monkeypatch.setattr(indexer, "_create_point", MagicMock(return_value="POINT"))
 
             summary, chunks = indexer._split_document(doc, "")
             points = await indexer._build_points(doc, summary, chunks)

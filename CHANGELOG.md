@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.4.0] - 2026-10-01
+
+### Added
+
+- Automatically migrate document vectors when the configured embedding identity changes. Retained physical generations preserve the previous index while replacement vectors are built from stored text, including documents whose source files are unavailable.
+- Added an optional `tokenizer` extra for local, model-token-aware embedding input budgets.
+
+### Fixed
+
+- Bind searches, similarity queries, indexing and metadata changes to a compatible physical generation. Serialize index mutations with migration and preserve document hashes, extraction states and sparse vocabulary contributions during migration.
+- Persist exact embedding input for future migrations, including document summaries and chunks.
+- Mark semantic search inputs as queries so asymmetric embedding models can apply their query-specific formatting.
+
 ## [1.3.2] - 2026-09-04
 
 ### Changed

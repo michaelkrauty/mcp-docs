@@ -141,6 +141,7 @@ async def move_file(source_path: str, destination_path: str) -> dict:
 
         # 6. Move the file
         try:
+            await indexer.ensure_collection()
             shutil.move(str(source), str(dest))
         except OSError as e:
             return error_response(ErrorCode.INVALID_INPUT, f"Failed to move file: {e}")
@@ -338,6 +339,7 @@ async def rename_directory(path: str, new_name: str) -> dict:
 
         # 8. Move directory
         try:
+            await indexer.ensure_collection()
             shutil.move(str(dir_path), str(new_path))
         except OSError as e:
             return error_response(ErrorCode.INVALID_INPUT, f"Failed to rename directory: {e}")
@@ -448,6 +450,7 @@ async def move_directory(source_path: str, destination_path: str) -> dict:
 
         # 6. Move directory
         try:
+            await indexer.ensure_collection()
             shutil.move(str(source), str(dest))
         except OSError as e:
             return error_response(ErrorCode.INVALID_INPUT, f"Failed to move directory: {e}")
@@ -517,7 +520,7 @@ async def delete_directory(path: str, recursive: bool = False) -> dict:
         if docs_in_dir:
             return error_response(
                 ErrorCode.CONFLICT,
-                f"Directory contains {len(docs_in_dir)} registered documents, cannot delete"
+                f"Directory contains {len(docs_in_dir)} registered documents, cannot delete",
             )
 
         # 4. If recursive: walk and verify all subdirs empty of files
@@ -526,7 +529,7 @@ async def delete_directory(path: str, recursive: bool = False) -> dict:
                 if item.is_file():
                     return error_response(
                         ErrorCode.CONFLICT,
-                        f"Directory tree contains files, cannot delete (found: {item})"
+                        f"Directory tree contains files, cannot delete (found: {item})",
                     )
         else:
             # Check only immediate children for non-recursive
@@ -534,7 +537,7 @@ async def delete_directory(path: str, recursive: bool = False) -> dict:
                 if item.is_file():
                     return error_response(
                         ErrorCode.CONFLICT,
-                        f"Directory contains files, cannot delete (found: {item})"
+                        f"Directory contains files, cannot delete (found: {item})",
                     )
 
         # 5. Delete directory

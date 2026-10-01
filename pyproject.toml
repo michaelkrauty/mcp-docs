@@ -1,6 +1,6 @@
 [project]
 name = "mcp-docs"
-version = "1.3.2"
+version = "1.4.0"
 description = "MCP server for document management with vector search"
 readme = "README.md"
 authors = [
@@ -27,6 +27,7 @@ Homepage = "https://github.com/michaelkrauty/mcp-docs"
 Repository = "https://github.com/michaelkrauty/mcp-docs"
 
 [project.optional-dependencies]
+tokenizer = ["vector-core[tokenizer]"]
 # ocr stays an extra: it is an optional runtime feature consumers opt into,
 # not tooling for working on this package.
 ocr = [

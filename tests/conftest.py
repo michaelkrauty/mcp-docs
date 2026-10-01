@@ -1,18 +1,36 @@
 """Shared pytest fixtures for mcp-docs tests."""
 
+import atexit
+import os
 import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+
+# Set before importing server modules, whose settings are initialized at import.
+_test_state = tempfile.TemporaryDirectory(prefix="mcp-docs-tests-")
+atexit.register(_test_state.cleanup)
+os.environ["VECTOR_SHARED_DATA_DIR"] = str(Path(_test_state.name) / "data")
+os.environ["VECTOR_CACHE_DIR"] = str(Path(_test_state.name) / "cache")
+os.environ["VECTOR_QDRANT_URL"] = os.environ.get("MCP_DOCS_TEST_QDRANT_URL", "http://127.0.0.1:1")
+os.environ["VECTOR_EMBEDDING_URL"] = os.environ.get(
+    "MCP_DOCS_TEST_EMBEDDING_URL", "http://127.0.0.1:1"
+)
 
 
 def qdrant_available() -> bool:
     """Check if Qdrant is running."""
     import httpx
 
+    url = os.environ.get("MCP_DOCS_TEST_QDRANT_URL")
+    if not url:
+        return False
     try:
-        response = httpx.get("http://localhost:6333/collections", timeout=2.0)
+        response = httpx.get(f"{url}/collections", timeout=2.0)
         return response.status_code == 200
     except Exception:
         return False
@@ -22,8 +40,11 @@ def embedding_available() -> bool:
     """Check if embedding service is running."""
     import httpx
 
+    url = os.environ.get("MCP_DOCS_TEST_EMBEDDING_URL")
+    if not url:
+        return False
     try:
-        response = httpx.get("http://localhost:8080/health", timeout=2.0)
+        response = httpx.get(f"{url}/health", timeout=2.0)
         return response.status_code == 200
     except Exception:
         return False
@@ -63,9 +84,29 @@ async def qdrant_storage():
     """Create QdrantStorage instance for testing."""
     from vector_core import QdrantStorage
 
-    storage = QdrantStorage(url="http://localhost:6333")
+    url = os.environ.get("MCP_DOCS_TEST_QDRANT_URL")
+    if not url:
+        pytest.skip("Set MCP_DOCS_TEST_QDRANT_URL to an isolated test service")
+    storage = QdrantStorage(url=url)
     yield storage
     await storage.close()
+
+
+@pytest.fixture
+def embedding_generation(monkeypatch):
+    """Keep legacy unit tests focused on their mocked storage operations."""
+
+    async def ensure(storage, logical_name, embedder, resolver, **kwargs):
+        return SimpleNamespace(physical_name=logical_name)
+
+    @asynccontextmanager
+    async def lock(storage, logical_name):
+        yield
+
+    monkeypatch.setattr(
+        "mcp_docs.embedding.ensure_embedding_collection", AsyncMock(side_effect=ensure)
+    )
+    monkeypatch.setattr("mcp_docs.embedding.embedding_collection_lock", lock)
 
 
 @pytest.fixture

@@ -232,6 +232,14 @@ file_count: 42
 
 Plus inherited vector-core settings (`VECTOR_QDRANT_URL`, `VECTOR_EMBEDDING_URL`, etc.).
 
+### Changing embedding models
+
+Change the vector-core embedding configuration and restart the server. The first index or search operation builds a compatible physical collection from persisted embedding text before using it. Changing the model, endpoint, dimension or deployment namespace triggers migration, including same-dimension model changes. Set a new `VECTOR_EMBEDDING_CACHE_NAMESPACE` when an unchanged model alias serves different weights or behavior; the embeddings protocol cannot detect that change automatically.
+
+Migration preserves document IDs, metadata, processing states, hashes and sparse vectors. Existing chunks are re-embedded from Qdrant content, so unavailable source files do not prevent migration. Shared glossary entries use their full stored definitions. Incomplete migrations do not replace the active generation, and previous collections remain available for recovery. Updated writers serialize with migration; restart all clients sharing a collection when changing configuration.
+
+Install the optional `tokenizer` extra for model-token-aware input budgeting (`uv sync --extra tokenizer` in a checkout). Configure vector-core with a local tokenizer file and the model's input-token limit. Tokenization uses the local file; embedding calls do not download tokenizer artifacts. Without the extra, vector-core uses its conservative dependency-free input budget.
+
 ## Integration with mcp-notes
 
 - **Shared glossary**: Same `glossary.db`, same terms

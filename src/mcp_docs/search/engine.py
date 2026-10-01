@@ -12,6 +12,7 @@ from vector_core import (
 )
 from vector_core.embeddings.global_vocab import GlobalVocabulary
 
+from mcp_docs.embedding import EmbeddingCollection, embedding_operation
 from mcp_docs.models import DocumentNotFoundError
 from mcp_docs.settings import settings
 
@@ -65,7 +66,7 @@ class SearchResult:
         return result
 
 
-class DocumentSearchEngine:
+class DocumentSearchEngine(EmbeddingCollection):
     """
     Hybrid search engine for documents.
 
@@ -88,6 +89,7 @@ class DocumentSearchEngine:
             global_vocab: GlobalVocabulary instance (created if not provided)
             collection_name: Qdrant collection name (from settings if not provided)
         """
+        super().__init__()
         self.storage = storage
         self.embedder = embedder
         self._global_vocab = global_vocab
@@ -121,10 +123,13 @@ class DocumentSearchEngine:
     @property
     def collection_name(self) -> str:
         """Get collection name."""
+        if active := self.active_collection_name():
+            return active
         if self._collection_name is None:
             self._collection_name = settings.collection_name
         return self._collection_name
 
+    @embedding_operation()
     async def search(
         self,
         query: str,
@@ -152,9 +157,7 @@ class DocumentSearchEngine:
         filter_conditions: list[FieldCondition] = []
 
         if not include_chunks:
-            filter_conditions.append(
-                FieldCondition(key="type", match=MatchValue(value="document"))
-            )
+            filter_conditions.append(FieldCondition(key="type", match=MatchValue(value="document")))
 
         if doc_type:
             filter_conditions.append(
@@ -163,12 +166,10 @@ class DocumentSearchEngine:
 
         if tags:
             for tag in _normalize_tag_filters(tags):
-                filter_conditions.append(
-                    FieldCondition(key="tags", match=MatchValue(value=tag))
-                )
+                filter_conditions.append(FieldCondition(key="tags", match=MatchValue(value=tag)))
 
         # Generate query vectors
-        dense_vector = await self.embedder.embed_single_cached(query)
+        dense_vector = await self.embedder.embed_single_cached(query, role="query")
         sparse_vector = self.global_vocab.vectorize_query(query)
 
         # Perform hybrid search using HybridSearcher
@@ -210,6 +211,7 @@ class DocumentSearchEngine:
 
         return search_results
 
+    @embedding_operation()
     async def find_similar(
         self,
         document_id: UUID,
@@ -332,6 +334,7 @@ class DocumentSearchEngine:
 
         return search_results
 
+    @embedding_operation()
     async def get_document_chunks(
         self,
         document_id: UUID,
