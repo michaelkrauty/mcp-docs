@@ -33,7 +33,8 @@ async def _enqueue_pending(
     """One failed submission must not strand the rest of a completed scan."""
     for doc_id, file_path in pending:
         try:
-            await processor.enqueue(doc_id, file_path)
+            if await processor.enqueue(doc_id, file_path) is False:
+                raise RuntimeError("Processing queue rejected the document")
         except Exception as error:
             logging.getLogger(__name__).exception("Failed to enqueue scanned document %s", doc_id)
             for result in results:

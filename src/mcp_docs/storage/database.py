@@ -95,6 +95,14 @@ class DocumentStore(ThreadSafeSQLiteStore):
             )
         """)
 
+        # Worker ownership is independent of mutable document metadata.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS processing_attempts (
+                document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+                token TEXT NOT NULL
+            )
+        """)
+
         # Document tags (one-to-many with documents)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS document_tags (
@@ -377,19 +385,42 @@ class DocumentStore(ThreadSafeSQLiteStore):
 
         return self.read(document_id)
 
-    def fail_processing_attempt(self, document_id: UUID, attempt: datetime, error: str) -> bool:
+    def start_processing_attempt(self, document_id: UUID) -> str:
+        """Assign an immutable token independently of document metadata updates."""
+        conn = self._get_conn()
+        token = str(uuid4())
+        with conn:
+            cursor = conn.execute(
+                "UPDATE documents SET extraction_status = ?, indexed_at = ? WHERE id = ?",
+                (
+                    ExtractionStatus.PROCESSING.value,
+                    datetime.now(UTC).isoformat(),
+                    str(document_id),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise DocumentNotFoundError(f"Document not found: {document_id}")
+            conn.execute(
+                "INSERT INTO processing_attempts(document_id, token) VALUES (?, ?) "
+                "ON CONFLICT(document_id) DO UPDATE SET token = excluded.token",
+                (str(document_id), token),
+            )
+        return token
+
+    def fail_processing_attempt(self, document_id: UUID, attempt: str, error: str) -> bool:
         """Persist failure only while this exact processing attempt still owns the row."""
         conn = self._get_conn()
         cursor = conn.execute(
             "UPDATE documents SET extraction_status = ?, extraction_error = ?, indexed_at = ? "
-            "WHERE id = ? AND extraction_status = ? AND indexed_at = ?",
+            "WHERE id = ? AND extraction_status = ? AND EXISTS ("
+            "SELECT 1 FROM processing_attempts WHERE document_id = documents.id AND token = ?)",
             (
                 ExtractionStatus.FAILED.value,
                 error,
                 datetime.now(UTC).isoformat(),
                 str(document_id),
                 ExtractionStatus.PROCESSING.value,
-                attempt.isoformat(),
+                attempt,
             ),
         )
         conn.commit()

@@ -589,6 +589,38 @@ async def test_deferred_enqueue_continues_after_failure(tmp_path):
     assert result.errors == [f"{tmp_path / 'first'}: enqueue failed: queue failure"]
 
 
+async def test_deferred_queue_rejection_is_visible(tmp_path):
+    from mcp_docs.tools.roots import _enqueue_pending
+
+    processor = AsyncMock()
+    processor.enqueue.side_effect = [False, True]
+    result = SimpleNamespace(root_path=str(tmp_path), errors=[])
+    await _enqueue_pending(
+        processor, [(uuid4(), tmp_path / "one"), (uuid4(), tmp_path / "two")], [result]
+    )
+    assert processor.enqueue.await_count == 2
+    assert len(result.errors) == 1
+    assert "Processing queue rejected" in result.errors[0]
+
+
+def test_processing_attempt_survives_metadata_changes(document_store, sample_text):
+    doc = document_store.register(sample_text)
+    token = document_store.start_processing_attempt(doc.id)
+    document_store.update(doc.id, title="Unrelated metadata change")
+    assert document_store.fail_processing_attempt(doc.id, token, "extraction failure")
+    assert document_store.read(doc.id).extraction_status == ExtractionStatus.FAILED
+
+
+def test_new_processing_attempt_rejects_old_failure(document_store, sample_text):
+    doc = document_store.register(sample_text)
+    old = document_store.start_processing_attempt(doc.id)
+    new = document_store.start_processing_attempt(doc.id)
+    assert old != new
+    assert not document_store.fail_processing_attempt(doc.id, old, "stale failure")
+    assert document_store.read(doc.id).extraction_status == ExtractionStatus.PROCESSING
+    assert document_store.fail_processing_attempt(doc.id, new, "current failure")
+
+
 async def test_superseded_worker_does_not_report_extraction_completed(document_store, sample_text):
     from mcp_docs.processing.queue import DocumentProcessor, ProcessingStatus, ProcessingTask
 

@@ -891,10 +891,7 @@ class DocumentProcessor:
         logger.info(f"Processing document {task.document_id}: {task.path}")
 
         # Update status to processing
-        attempt = self.document_store.update(
-            task.document_id,
-            extraction_status=ExtractionStatus.PROCESSING,
-        )
+        attempt = self.document_store.start_processing_attempt(task.document_id)
 
         try:
             # Run extraction in shared thread pool (blocking I/O)
@@ -947,9 +944,7 @@ class DocumentProcessor:
             logger.error(f"Processing failed for {task.document_id}: {error_msg}")
 
             # Update document with error
-            self.document_store.fail_processing_attempt(
-                task.document_id, attempt.indexed_at, error_msg
-            )
+            self.document_store.fail_processing_attempt(task.document_id, attempt, error_msg)
 
             return ProcessingResult(
                 document_id=task.document_id,
