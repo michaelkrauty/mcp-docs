@@ -479,3 +479,71 @@ async def test_filesystem_and_registry_move_under_generation_lock(
     assert result["success"] is True
     storage.update_payload.assert_awaited_once()
     assert not held
+
+
+async def test_duplicate_relocation_preflights_before_registry_change(
+    document_store, sample_text, tmp_path, monkeypatch
+):
+    from mcp_docs.tools import documents
+
+    doc = document_store.register(sample_text)
+    relocated = tmp_path / "relocated.txt"
+    relocated.write_bytes(sample_text.read_bytes())
+    indexer = AsyncMock()
+    indexer.collection_operation = MagicMock(side_effect=RuntimeError("superseded"))
+    monkeypatch.setattr(documents, "get_document_store", lambda: document_store)
+    monkeypatch.setattr(documents, "get_document_indexer", AsyncMock(return_value=indexer))
+    with pytest.raises(RuntimeError, match="superseded"):
+        await documents.register_document(str(relocated))
+    assert document_store.read(doc.id) == doc
+
+
+@pytest.mark.parametrize("all_roots", [False, True])
+async def test_scan_locks_registry_changes_but_enqueues_after_unlock(
+    all_roots, document_store, sample_text, monkeypatch
+):
+    from mcp_docs.tools import roots
+
+    root = document_store.add_root(str(sample_text.parent))
+    storage, embedder, vocab = components()
+    indexer = DocumentIndexer(document_store, storage, embedder, vocab, "documents")
+    held = False
+
+    @asynccontextmanager
+    async def lock(storage, logical_name):
+        nonlocal held
+        held = True
+        try:
+            yield
+        finally:
+            held = False
+
+    async def scan(*args, **kwargs):
+        assert held
+        await kwargs["enqueue_callback"](uuid4(), sample_text)
+        await kwargs["delete_callback"](uuid4())
+        result = SimpleNamespace(to_dict=lambda: {"scanned": True})
+        return [result] if all_roots else result
+
+    async def enqueue(*args):
+        assert not held
+
+    scanner = AsyncMock()
+    scanner.scan_root.side_effect = scan
+    scanner.scan_all_roots.side_effect = scan
+    processor = AsyncMock()
+    processor.enqueue.side_effect = enqueue
+    monkeypatch.setattr("mcp_docs.embedding.embedding_collection_lock", lock)
+    monkeypatch.setattr(
+        "mcp_docs.embedding.ensure_embedding_collection",
+        AsyncMock(return_value=SimpleNamespace(physical_name="documents_generation_new")),
+    )
+    monkeypatch.setattr(roots, "get_document_store", lambda: document_store)
+    monkeypatch.setattr(roots, "get_document_indexer", AsyncMock(return_value=indexer))
+    monkeypatch.setattr(roots, "get_document_scanner", AsyncMock(return_value=scanner))
+    monkeypatch.setattr(roots, "get_document_processor", AsyncMock(return_value=processor))
+    if all_roots:
+        await roots.scan_all_roots()
+    else:
+        await roots.scan_document_root(root.path)
+    processor.enqueue.assert_awaited_once()
