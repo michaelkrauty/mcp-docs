@@ -891,7 +891,7 @@ class DocumentProcessor:
         logger.info(f"Processing document {task.document_id}: {task.path}")
 
         # Update status to processing
-        self.document_store.update(
+        attempt = self.document_store.update(
             task.document_id,
             extraction_status=ExtractionStatus.PROCESSING,
         )
@@ -947,10 +947,8 @@ class DocumentProcessor:
             logger.error(f"Processing failed for {task.document_id}: {error_msg}")
 
             # Update document with error
-            self.document_store.update(
-                task.document_id,
-                extraction_status=ExtractionStatus.FAILED,
-                extraction_error=error_msg,
+            self.document_store.fail_processing_attempt(
+                task.document_id, attempt.indexed_at, error_msg
             )
 
             return ProcessingResult(

@@ -583,8 +583,10 @@ async def test_deferred_enqueue_continues_after_failure(tmp_path):
     processor = AsyncMock()
     processor.enqueue.side_effect = [RuntimeError("queue failure"), None]
     pending = [(uuid4(), tmp_path / "first"), (uuid4(), tmp_path / "second")]
-    await _enqueue_pending(processor, pending)
+    result = SimpleNamespace(root_path=str(tmp_path), errors=[])
+    await _enqueue_pending(processor, pending, [result])
     assert processor.enqueue.await_count == 2
+    assert result.errors == [f"{tmp_path / 'first'}: enqueue failed: queue failure"]
 
 
 async def test_superseded_worker_does_not_report_extraction_completed(document_store, sample_text):
@@ -606,5 +608,29 @@ async def test_superseded_worker_does_not_report_extraction_completed(document_s
         assert current.extraction_status == ExtractionStatus.FAILED
         assert current.extraction_error == "superseded"
         indexer.index_document.assert_not_awaited()
+    finally:
+        processor._executor.shutdown(wait=True)
+
+
+async def test_stale_worker_failure_preserves_newer_indexed_attempt(document_store, sample_text):
+    from mcp_docs.processing.queue import DocumentProcessor, ProcessingStatus, ProcessingTask
+
+    doc = document_store.register(sample_text)
+    indexer = AsyncMock()
+
+    @asynccontextmanager
+    async def superseded(**kwargs):
+        document_store.update(doc.id, extraction_status=ExtractionStatus.INDEXED)
+        raise RuntimeError("superseded")
+        yield
+
+    indexer.collection_operation = superseded
+    extractor = MagicMock()
+    processor = DocumentProcessor(document_store, indexer=indexer, extractor=extractor)
+    try:
+        result = await processor._process(ProcessingTask(doc.id, sample_text))
+        assert result.status == ProcessingStatus.FAILED
+        assert document_store.read(doc.id).extraction_status == ExtractionStatus.INDEXED
+        assert document_store.read(doc.id).extraction_error is None
     finally:
         processor._executor.shutdown(wait=True)
