@@ -66,16 +66,21 @@ async def register_document(
     # INSERT OR IGNORE).
     existing = store.get_by_hash(content_hash)
     was_registered = existing is not None
-    old_filename = existing.filename if existing else None
 
     if existing is not None and existing.path != str(file_path):
         indexer = await get_document_indexer()
         async with indexer.collection_operation(write=True):
+            existing = store.get_by_hash(content_hash)
             document = store.register(path=file_path, content_hash=content_hash, tags=tags or [])
-            await indexer.update_document_path_in_index(document.id, document.path)
-            if old_filename != document.filename:
-                await indexer.update_document_filename_in_index(document)
-        return {**document.to_dict(), "already_registered": True}
+            if existing is not None:
+                await indexer.update_document_path_in_index(document.id, document.path)
+                if existing.filename != document.filename:
+                    await indexer.update_document_filename_in_index(document)
+        if existing is not None:
+            return {**document.to_dict(), "already_registered": True}
+        processor = await get_document_processor()
+        await processor.enqueue(document.id, file_path)
+        return document.to_dict()
 
     # Register document (atomically handles duplicates)
     document = store.register(

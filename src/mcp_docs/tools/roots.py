@@ -9,11 +9,14 @@ Tools:
 - scan_all_roots: Trigger a scan of all enabled document roots
 """
 
+import logging
 from pathlib import Path
+from uuid import UUID
 
 from vector_core.errors import ErrorCode, error_response
 
 from mcp_docs.app import mcp
+from mcp_docs.processing import DocumentProcessor
 from mcp_docs.singletons import (
     get_document_indexer,
     get_document_processor,
@@ -21,6 +24,15 @@ from mcp_docs.singletons import (
     get_document_store,
 )
 from mcp_docs.tools.documents import delete_document_artifacts
+
+
+async def _enqueue_pending(processor: DocumentProcessor, pending: list[tuple[UUID, Path]]) -> None:
+    """One failed submission must not strand the rest of a completed scan."""
+    for doc_id, file_path in pending:
+        try:
+            await processor.enqueue(doc_id, file_path)
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to enqueue scanned document %s", doc_id)
 
 
 @mcp.tool()
@@ -97,8 +109,7 @@ async def add_document_root(
                     delete_callback=delete_doc_index,
                     relocate_callback=relocate_doc_index,
                 )
-            for doc_id, file_path in pending:
-                await processor.enqueue(doc_id, file_path)
+            await _enqueue_pending(processor, pending)
             result["scan_result"] = scan_result.to_dict()
         except Exception as e:
             result["scan_error"] = str(e)
@@ -232,8 +243,7 @@ async def scan_document_root(path: str) -> dict:
             delete_callback=delete_doc_index,
             relocate_callback=relocate_doc_index,
         )
-    for doc_id, file_path in pending:
-        await processor.enqueue(doc_id, file_path)
+    await _enqueue_pending(processor, pending)
     return result.to_dict()
 
 
@@ -266,6 +276,5 @@ async def scan_all_roots() -> list[dict]:
             delete_callback=delete_doc_index,
             relocate_callback=relocate_doc_index,
         )
-    for doc_id, file_path in pending:
-        await processor.enqueue(doc_id, file_path)
+    await _enqueue_pending(processor, pending)
     return [r.to_dict() for r in results]

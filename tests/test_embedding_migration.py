@@ -547,3 +547,64 @@ async def test_scan_locks_registry_changes_but_enqueues_after_unlock(
     else:
         await roots.scan_document_root(root.path)
     processor.enqueue.assert_awaited_once()
+
+
+async def test_deleted_duplicate_is_enqueued_as_new_registration(
+    document_store, sample_text, tmp_path, monkeypatch
+):
+    from mcp_docs.tools import documents
+
+    old = document_store.register(sample_text)
+    relocated = tmp_path / "new.txt"
+    relocated.write_bytes(sample_text.read_bytes())
+
+    @asynccontextmanager
+    async def operation(**kwargs):
+        document_store.delete(old.id)
+        yield
+
+    indexer = AsyncMock()
+    indexer.collection_operation = operation
+    processor = AsyncMock()
+    monkeypatch.setattr(documents, "get_document_store", lambda: document_store)
+    monkeypatch.setattr(documents, "get_document_indexer", AsyncMock(return_value=indexer))
+    monkeypatch.setattr(documents, "get_document_processor", AsyncMock(return_value=processor))
+    result = await documents.register_document(str(relocated))
+    new = document_store.get_by_path(str(relocated))
+    assert new.id != old.id
+    assert not result.get("already_registered")
+    processor.enqueue.assert_awaited_once_with(new.id, relocated)
+    indexer.update_document_path_in_index.assert_not_awaited()
+
+
+async def test_deferred_enqueue_continues_after_failure(tmp_path):
+    from mcp_docs.tools.roots import _enqueue_pending
+
+    processor = AsyncMock()
+    processor.enqueue.side_effect = [RuntimeError("queue failure"), None]
+    pending = [(uuid4(), tmp_path / "first"), (uuid4(), tmp_path / "second")]
+    await _enqueue_pending(processor, pending)
+    assert processor.enqueue.await_count == 2
+
+
+async def test_superseded_worker_does_not_report_extraction_completed(document_store, sample_text):
+    from mcp_docs.processing.queue import DocumentProcessor, ProcessingStatus, ProcessingTask
+
+    doc = document_store.register(sample_text)
+    indexer = AsyncMock()
+    indexer.collection_operation = MagicMock(side_effect=RuntimeError("superseded"))
+    extractor = MagicMock()
+    extractor.extract.return_value = SimpleNamespace(
+        text="Extracted text", title="New title", page_count=1, word_count=2
+    )
+    processor = DocumentProcessor(document_store, indexer=indexer, extractor=extractor)
+    try:
+        result = await processor._process(ProcessingTask(doc.id, sample_text))
+        assert result.status == ProcessingStatus.FAILED
+        current = document_store.read(doc.id)
+        assert current.title == doc.title
+        assert current.extraction_status == ExtractionStatus.FAILED
+        assert current.extraction_error == "superseded"
+        indexer.index_document.assert_not_awaited()
+    finally:
+        processor._executor.shutdown(wait=True)
