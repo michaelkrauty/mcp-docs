@@ -15,6 +15,7 @@ from vector_core import (
     create_hybrid_point_with_key,
 )
 
+from mcp_docs.embedding import EmbeddingCollection, embedding_operation
 from mcp_docs.extraction.extractor import extract_content
 from mcp_docs.indexing.chunker import DocumentChunker, chunk_document
 from mcp_docs.models import (
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 DOCS_CODEBASE_ID = "docs"
 
 
-class DocumentIndexer:
+class DocumentIndexer(EmbeddingCollection):
     """
     Indexes documents into Qdrant for hybrid search.
 
@@ -65,6 +66,7 @@ class DocumentIndexer:
             global_vocab: GlobalVocabulary instance (created if not provided)
             collection_name: Qdrant collection name (from settings if not provided)
         """
+        super().__init__()
         self.document_store = document_store
         self.storage = storage
         self.embedder = embedder
@@ -84,17 +86,16 @@ class DocumentIndexer:
     @property
     def collection_name(self) -> str:
         """Get collection name."""
+        if active := self.active_collection_name():
+            return active
         if self._collection_name is None:
             self._collection_name = settings.collection_name
         return self._collection_name
 
+    @embedding_operation(write=True)
     async def ensure_collection(self) -> None:
         """Ensure Qdrant collection exists with required indexes."""
         await self._ensure_components()
-
-        if not await self.storage.collection_exists(self.collection_name):
-            await self.storage.create_collection(self.collection_name)
-            logger.info(f"Created collection: {self.collection_name}")
 
         # Ensure payload indexes for efficient filtering (idempotent)
         await self.storage.ensure_payload_indexes(
@@ -211,6 +212,7 @@ class DocumentIndexer:
             net_doc_change=len(actual) - 1,
         )
 
+    @embedding_operation(write=True)
     async def index_document(
         self,
         document_id: UUID,
@@ -267,6 +269,7 @@ class DocumentIndexer:
 
         return len(points)
 
+    @embedding_operation(write=True)
     async def index_all(self, force: bool = False) -> dict:
         """
         Index all extracted documents using two-pass GlobalVocabulary pattern.
@@ -311,9 +314,7 @@ class DocumentIndexer:
         if not force:
             indexed_hashes = await self._get_indexed_hashes()
             docs_to_index = [
-                doc
-                for doc in docs_to_index
-                if self._doc_hash(doc) not in indexed_hashes
+                doc for doc in docs_to_index if self._doc_hash(doc) not in indexed_hashes
             ]
 
         if not docs_to_index:
@@ -465,6 +466,7 @@ class DocumentIndexer:
             return False
         return True
 
+    @embedding_operation(write=True)
     async def delete_document_index(self, document_id: UUID) -> None:
         """
         Remove a document from the index.
@@ -587,6 +589,7 @@ class DocumentIndexer:
             "type": point_type,
             "document_id": str(document.id),
             "content": content,
+            "embedding_text": content,
             "content_hash": document.content_hash,
             "filename": document.filename,
             "path": document.path,
@@ -706,6 +709,7 @@ class DocumentIndexer:
         await self._delete_document_points(document_id)
         await self.storage.upsert_batch(self.collection_name, points)
 
+    @embedding_operation(write=True)
     async def update_document_path_in_index(self, document_id: UUID, new_path: str) -> None:
         """
         Update path in vector index payloads for a document's chunks.
@@ -722,12 +726,13 @@ class DocumentIndexer:
                 filter_conditions=[
                     FieldCondition(key="document_id", match=MatchValue(value=str(document_id))),
                 ],
-                payload={"path": new_path}
+                payload={"path": new_path},
             )
             logger.debug(f"Updated path in index for document {document_id}: {new_path}")
         except Exception as e:
             logger.warning(f"Failed to update path in index for document {document_id}: {e}")
 
+    @embedding_operation(write=True)
     async def update_document_tags_in_index(self, document: Document) -> None:
         """
         Propagate a document's current tags into the vector index.
@@ -783,6 +788,7 @@ class DocumentIndexer:
         except Exception as e:
             logger.warning(f"Failed to refresh summary point for document {document_id}: {e}")
 
+    @embedding_operation(write=True)
     async def update_document_filename_in_index(self, document: Document) -> None:
         """
         Propagate a document's current basename into the vector index.
@@ -838,6 +844,7 @@ class DocumentIndexer:
         except Exception as e:
             logger.warning(f"Failed to refresh summary point for document {document_id}: {e}")
 
+    @embedding_operation(write=True)
     async def update_paths_batch_in_index(self, old_prefix: str, new_prefix: str) -> int:
         """
         Batch update paths in vector index for directory moves.
@@ -884,19 +891,18 @@ class DocumentIndexer:
             # Update each unique path with a single bulk update call
             updated_count = 0
             for old_path in old_paths:
-                new_path = new_dir + old_path[len(old_dir):]
+                new_path = new_dir + old_path[len(old_dir) :]
                 await self.storage.update_payload(
                     self.collection_name,
                     filter_conditions=[
                         FieldCondition(key="path", match=MatchValue(value=old_path)),
                     ],
-                    payload={"path": new_path}
+                    payload={"path": new_path},
                 )
                 updated_count += 1
 
             logger.info(
-                f"Updated {updated_count} unique paths in index: "
-                f"{old_prefix} -> {new_prefix}"
+                f"Updated {updated_count} unique paths in index: {old_prefix} -> {new_prefix}"
             )
             return updated_count
 

@@ -7,7 +7,6 @@ Tools:
 - get_document_chunks: Get all indexed chunks for a document
 """
 
-
 import logging
 
 from qdrant_client.models import FieldCondition, Filter, MatchText, MatchValue
@@ -16,7 +15,6 @@ from vector_core.errors import ErrorCode, error_response
 
 from mcp_docs.app import mcp
 from mcp_docs.models import DocumentNotFoundError
-from mcp_docs.settings import settings
 from mcp_docs.singletons import get_search_engine
 from mcp_docs.tools._validation import validate_doc_type
 
@@ -107,19 +105,16 @@ async def keyword_search(
     limit = min(max(1, limit), 1000)
 
     engine = await get_search_engine()
-    await engine._ensure_components()
+    async with engine.collection_operation(write=False):
+        collection_name = engine.collection_name
     client = await engine.storage.get_client()
 
     # Build filter conditions for keyword matching
     should_conditions = []
     if search_content:
-        should_conditions.append(
-            FieldCondition(key="content", match=MatchText(text=keyword))
-        )
+        should_conditions.append(FieldCondition(key="content", match=MatchText(text=keyword)))
     if search_filename:
-        should_conditions.append(
-            FieldCondition(key="filename", match=MatchText(text=keyword))
-        )
+        should_conditions.append(FieldCondition(key="filename", match=MatchText(text=keyword)))
 
     # Build must conditions for additional filters
     must_conditions = []
@@ -158,7 +153,7 @@ async def keyword_search(
 
     while len(results) < limit and scanned < max_scan:
         points, offset = await client.scroll(
-            settings.collection_name,
+            collection_name,
             scroll_filter=scroll_filter,
             limit=min(page_size, max_scan - scanned),
             offset=offset,
@@ -176,14 +171,16 @@ async def keyword_search(
                 continue
             seen_docs.add(doc_id)
 
-            results.append({
-                "document_id": doc_id,
-                "filename": payload.get("filename", ""),
-                "path": payload.get("path", ""),
-                "doc_type": payload.get("doc_type", ""),
-                "title": payload.get("title"),
-                "tags": payload.get("tags", []),
-            })
+            results.append(
+                {
+                    "document_id": doc_id,
+                    "filename": payload.get("filename", ""),
+                    "path": payload.get("path", ""),
+                    "doc_type": payload.get("doc_type", ""),
+                    "title": payload.get("title"),
+                    "tags": payload.get("tags", []),
+                }
+            )
 
             if len(results) >= limit:
                 break

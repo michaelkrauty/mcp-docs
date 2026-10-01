@@ -9,11 +9,15 @@ Tools:
 - scan_all_roots: Trigger a scan of all enabled document roots
 """
 
+import logging
 from pathlib import Path
+from uuid import UUID
 
 from vector_core.errors import ErrorCode, error_response
 
 from mcp_docs.app import mcp
+from mcp_docs.processing import DocumentProcessor
+from mcp_docs.scanning.scanner import MAX_ERRORS, ScanResult
 from mcp_docs.singletons import (
     get_document_indexer,
     get_document_processor,
@@ -21,6 +25,28 @@ from mcp_docs.singletons import (
     get_document_store,
 )
 from mcp_docs.tools.documents import delete_document_artifacts
+
+
+async def _enqueue_pending(
+    processor: DocumentProcessor, pending: list[tuple[UUID, Path]], results: list[ScanResult]
+) -> None:
+    """One failed submission must not strand the rest of a completed scan."""
+    for doc_id, file_path in pending:
+        try:
+            if await processor.enqueue(doc_id, file_path) is False:
+                raise RuntimeError("Processing queue rejected the document")
+        except Exception as error:
+            recorded = False
+            for result in results:
+                if len(result.errors) < MAX_ERRORS and file_path.is_relative_to(
+                    Path(result.root_path)
+                ):
+                    result.errors.append(f"{file_path}: enqueue failed: {error}")
+                    recorded = True
+            if recorded:
+                logging.getLogger(__name__).exception(
+                    "Failed to enqueue scanned document %s", doc_id
+                )
 
 
 @mcp.tool()
@@ -79,8 +105,10 @@ async def add_document_root(
             processor = await get_document_processor()
             indexer = await get_document_indexer()
 
+            pending = []
+
             async def enqueue_doc(doc_id, file_path):
-                await processor.enqueue(doc_id, file_path)
+                pending.append((doc_id, file_path))
 
             async def delete_doc_index(doc_id):
                 await indexer.delete_document_index(doc_id)
@@ -88,12 +116,14 @@ async def add_document_root(
             async def relocate_doc_index(doc_id, old_path, new_path):
                 await indexer.update_document_path_in_index(doc_id, new_path)
 
-            scan_result = await scanner.scan_root(
-                root,
-                enqueue_callback=enqueue_doc,
-                delete_callback=delete_doc_index,
-                relocate_callback=relocate_doc_index,
-            )
+            async with indexer.collection_operation(write=True):
+                scan_result = await scanner.scan_root(
+                    root,
+                    enqueue_callback=enqueue_doc,
+                    delete_callback=delete_doc_index,
+                    relocate_callback=relocate_doc_index,
+                )
+            await _enqueue_pending(processor, pending, [scan_result])
             result["scan_result"] = scan_result.to_dict()
         except Exception as e:
             result["scan_error"] = str(e)
@@ -171,9 +201,7 @@ async def remove_document_root(
         # fact sources) instead of orphaning the surplus beyond a row limit.
         docs = store.iter_summaries(document_root=str(root_path))
         for doc in docs:
-            sources_marked += await delete_document_artifacts(
-                store, doc.id, doc.content_hash
-            )
+            sources_marked += await delete_document_artifacts(store, doc.id, doc.content_hash)
             deleted_count += 1
 
     # Remove the root
@@ -211,8 +239,10 @@ async def scan_document_root(path: str) -> dict:
     processor = await get_document_processor()
     indexer = await get_document_indexer()
 
+    pending = []
+
     async def enqueue_doc(doc_id, file_path):
-        await processor.enqueue(doc_id, file_path)
+        pending.append((doc_id, file_path))
 
     async def delete_doc_index(doc_id):
         await indexer.delete_document_index(doc_id)
@@ -220,12 +250,14 @@ async def scan_document_root(path: str) -> dict:
     async def relocate_doc_index(doc_id, old_path, new_path):
         await indexer.update_document_path_in_index(doc_id, new_path)
 
-    result = await scanner.scan_root(
-        root,
-        enqueue_callback=enqueue_doc,
-        delete_callback=delete_doc_index,
-        relocate_callback=relocate_doc_index,
-    )
+    async with indexer.collection_operation(write=True):
+        result = await scanner.scan_root(
+            root,
+            enqueue_callback=enqueue_doc,
+            delete_callback=delete_doc_index,
+            relocate_callback=relocate_doc_index,
+        )
+    await _enqueue_pending(processor, pending, [result])
     return result.to_dict()
 
 
@@ -241,8 +273,10 @@ async def scan_all_roots() -> list[dict]:
     processor = await get_document_processor()
     indexer = await get_document_indexer()
 
+    pending = []
+
     async def enqueue_doc(doc_id, file_path):
-        await processor.enqueue(doc_id, file_path)
+        pending.append((doc_id, file_path))
 
     async def delete_doc_index(doc_id):
         await indexer.delete_document_index(doc_id)
@@ -250,9 +284,11 @@ async def scan_all_roots() -> list[dict]:
     async def relocate_doc_index(doc_id, old_path, new_path):
         await indexer.update_document_path_in_index(doc_id, new_path)
 
-    results = await scanner.scan_all_roots(
-        enqueue_callback=enqueue_doc,
-        delete_callback=delete_doc_index,
-        relocate_callback=relocate_doc_index,
-    )
+    async with indexer.collection_operation(write=True):
+        results = await scanner.scan_all_roots(
+            enqueue_callback=enqueue_doc,
+            delete_callback=delete_doc_index,
+            relocate_callback=relocate_doc_index,
+        )
+    await _enqueue_pending(processor, pending, results)
     return [r.to_dict() for r in results]

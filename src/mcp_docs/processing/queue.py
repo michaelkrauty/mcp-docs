@@ -6,6 +6,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -297,9 +298,7 @@ class DocumentProcessor:
                         extraction_error=None,
                     )
                     skipped += 1
-                    logger.debug(
-                        f"Migrated legacy cancelled document {doc.id} to CANCELLED"
-                    )
+                    logger.debug(f"Migrated legacy cancelled document {doc.id} to CANCELLED")
                     continue
 
                 # Skip failed docs with permanent (non-retriable) errors
@@ -310,8 +309,7 @@ class DocumentProcessor:
                 ):
                     skipped += 1
                     logger.debug(
-                        f"Skipping permanent failure {doc.id}: "
-                        f"{doc.extraction_error[:80]}"
+                        f"Skipping permanent failure {doc.id}: {doc.extraction_error[:80]}"
                     )
                     continue
 
@@ -609,10 +607,7 @@ class DocumentProcessor:
             return True
 
         # Wait for all documents concurrently
-        tasks = [
-            self.wait_for(doc_id, timeout=timeout)
-            for doc_id in document_ids
-        ]
+        tasks = [self.wait_for(doc_id, timeout=timeout) for doc_id in document_ids]
 
         try:
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -766,20 +761,24 @@ class DocumentProcessor:
 
         # In-progress
         for doc_id, task in self.in_progress.items():
-            result.append({
-                "document_id": str(doc_id),
-                "status": ProcessingStatus.PROCESSING.value,
-                "path": str(task.path),
-                "queued_at": task.queued_at.isoformat(),
-                "priority": task.priority,
-            })
+            result.append(
+                {
+                    "document_id": str(doc_id),
+                    "status": ProcessingStatus.PROCESSING.value,
+                    "path": str(task.path),
+                    "queued_at": task.queued_at.isoformat(),
+                    "priority": task.priority,
+                }
+            )
 
         # Note: asyncio.PriorityQueue doesn't support iteration
         # We report queue size instead
-        result.append({
-            "_queue_size": self.queue.qsize(),
-            "_workers_active": len(self.in_progress),
-        })
+        result.append(
+            {
+                "_queue_size": self.queue.qsize(),
+                "_workers_active": len(self.in_progress),
+            }
+        )
 
         return result
 
@@ -892,10 +891,7 @@ class DocumentProcessor:
         logger.info(f"Processing document {task.document_id}: {task.path}")
 
         # Update status to processing
-        self.document_store.update(
-            task.document_id,
-            extraction_status=ExtractionStatus.PROCESSING,
-        )
+        attempt = self.document_store.start_processing_attempt(task.document_id)
 
         try:
             # Run extraction in shared thread pool (blocking I/O)
@@ -906,25 +902,26 @@ class DocumentProcessor:
                 task.path,
             )
 
-            # Update document with extracted content; clear any stale
-            # extraction_error from a previously failed attempt.
-            self.document_store.update(
-                task.document_id,
-                title=content.title,
-                page_count=content.page_count,
-                word_count=content.word_count,
-                extraction_status=ExtractionStatus.EXTRACTED,
-                extraction_error=None,
+            operation = (
+                self.indexer.collection_operation(write=True)
+                if self.indexer is not None
+                else nullcontext()
             )
-
-            # Automatically index if indexer is configured
-            if self.indexer is not None:
-                try:
-                    points = await self.indexer.index_document(task.document_id, content.text)
-                    logger.debug(f"Indexed document {task.document_id}: {points} points")
-                except Exception as e:
-                    # Log but don't fail - document is extracted, indexing can be retried
-                    logger.warning(f"Auto-indexing failed for {task.document_id}: {e}")
+            async with operation:
+                self.document_store.update(
+                    task.document_id,
+                    title=content.title,
+                    page_count=content.page_count,
+                    word_count=content.word_count,
+                    extraction_status=ExtractionStatus.EXTRACTED,
+                    extraction_error=None,
+                )
+                if self.indexer is not None:
+                    try:
+                        points = await self.indexer.index_document(task.document_id, content.text)
+                        logger.debug(f"Indexed document {task.document_id}: {points} points")
+                    except Exception as e:
+                        logger.warning(f"Auto-indexing failed for {task.document_id}: {e}")
 
             completed_at = datetime.now(UTC)
             logger.info(
@@ -947,11 +944,7 @@ class DocumentProcessor:
             logger.error(f"Processing failed for {task.document_id}: {error_msg}")
 
             # Update document with error
-            self.document_store.update(
-                task.document_id,
-                extraction_status=ExtractionStatus.FAILED,
-                extraction_error=error_msg,
-            )
+            self.document_store.fail_processing_attempt(task.document_id, attempt, error_msg)
 
             return ProcessingResult(
                 document_id=task.document_id,

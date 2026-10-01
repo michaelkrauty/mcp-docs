@@ -139,29 +139,22 @@ async def move_file(source_path: str, destination_path: str) -> dict:
                 "Document processing did not complete within timeout",
             )
 
-        # 6. Move the file
-        try:
-            shutil.move(str(source), str(dest))
-        except OSError as e:
-            return error_response(ErrorCode.INVALID_INPUT, f"Failed to move file: {e}")
+        async with indexer.collection_operation(write=True):
+            try:
+                shutil.move(str(source), str(dest))
+            except OSError as e:
+                return error_response(ErrorCode.INVALID_INPUT, f"Failed to move file: {e}")
 
-        # 7. Update document path, document_root, and (on a rename) the basename.
-        #    move_file permits the destination to have a different basename than
-        #    the source, so the stored filename must track it or it goes stale.
-        renamed = dest.name != source.name
-        updated = store.update(
-            document.id,
-            path=str(dest),
-            document_root=dest_root,
-            filename=dest.name if renamed else None,
-        )
-
-        # 8. Update the vector index: the path payload always, and the filename
-        #    only when the basename changed (filename lives in every point's
-        #    payload and is embedded in the document summary text).
-        await indexer.update_document_path_in_index(document.id, str(dest))
-        if renamed:
-            await indexer.update_document_filename_in_index(updated)
+            renamed = dest.name != source.name
+            updated = store.update(
+                document.id,
+                path=str(dest),
+                document_root=dest_root,
+                filename=dest.name if renamed else None,
+            )
+            await indexer.update_document_path_in_index(document.id, str(dest))
+            if renamed:
+                await indexer.update_document_filename_in_index(updated)
 
         logger.info(f"Moved file {source} -> {dest}")
 
@@ -336,24 +329,19 @@ async def rename_directory(path: str, new_name: str) -> dict:
         if new_path.exists():
             return error_response(ErrorCode.CONFLICT, f"Destination already exists: {new_path}")
 
-        # 8. Move directory
-        try:
-            shutil.move(str(dir_path), str(new_path))
-        except OSError as e:
-            return error_response(ErrorCode.INVALID_INPUT, f"Failed to rename directory: {e}")
+        async with indexer.collection_operation(write=True):
+            try:
+                shutil.move(str(dir_path), str(new_path))
+            except OSError as e:
+                return error_response(ErrorCode.INVALID_INPUT, f"Failed to rename directory: {e}")
 
-        # 9. Update document paths in batch
-        old_prefix = str(dir_path)
-        new_prefix = str(new_path)
-        docs_updated = store.update_paths_batch(old_prefix, new_prefix)
-
-        # 10. Update document_root if needed
-        new_root = _find_document_root(new_path, store)
-        if new_root:
-            store.update_document_roots_batch(new_prefix, new_root)
-
-        # 11. Update vector index paths in batch
-        await indexer.update_paths_batch_in_index(old_prefix, new_prefix)
+            old_prefix = str(dir_path)
+            new_prefix = str(new_path)
+            docs_updated = store.update_paths_batch(old_prefix, new_prefix)
+            new_root = _find_document_root(new_path, store)
+            if new_root:
+                store.update_document_roots_batch(new_prefix, new_root)
+            await indexer.update_paths_batch_in_index(old_prefix, new_prefix)
 
         logger.info(f"Renamed directory {dir_path} -> {new_path}, updated {docs_updated} documents")
 
@@ -446,24 +434,19 @@ async def move_directory(source_path: str, destination_path: str) -> dict:
                     "Document processing did not complete within timeout",
                 )
 
-        # 6. Move directory
-        try:
-            shutil.move(str(source), str(dest))
-        except OSError as e:
-            return error_response(ErrorCode.INVALID_INPUT, f"Failed to move directory: {e}")
+        async with indexer.collection_operation(write=True):
+            try:
+                shutil.move(str(source), str(dest))
+            except OSError as e:
+                return error_response(ErrorCode.INVALID_INPUT, f"Failed to move directory: {e}")
 
-        # 7. Update document paths in batch
-        old_prefix = str(source)
-        new_prefix = str(dest)
-        docs_updated = store.update_paths_batch(old_prefix, new_prefix)
-
-        # 8. Update document_root if needed
-        new_root = _find_document_root(dest, store)
-        if new_root:
-            store.update_document_roots_batch(new_prefix, new_root)
-
-        # 9. Update vector index paths in batch
-        await indexer.update_paths_batch_in_index(old_prefix, new_prefix)
+            old_prefix = str(source)
+            new_prefix = str(dest)
+            docs_updated = store.update_paths_batch(old_prefix, new_prefix)
+            new_root = _find_document_root(dest, store)
+            if new_root:
+                store.update_document_roots_batch(new_prefix, new_root)
+            await indexer.update_paths_batch_in_index(old_prefix, new_prefix)
 
         logger.info(f"Moved directory {source} -> {dest}, updated {docs_updated} documents")
 
@@ -517,7 +500,7 @@ async def delete_directory(path: str, recursive: bool = False) -> dict:
         if docs_in_dir:
             return error_response(
                 ErrorCode.CONFLICT,
-                f"Directory contains {len(docs_in_dir)} registered documents, cannot delete"
+                f"Directory contains {len(docs_in_dir)} registered documents, cannot delete",
             )
 
         # 4. If recursive: walk and verify all subdirs empty of files
@@ -526,7 +509,7 @@ async def delete_directory(path: str, recursive: bool = False) -> dict:
                 if item.is_file():
                     return error_response(
                         ErrorCode.CONFLICT,
-                        f"Directory tree contains files, cannot delete (found: {item})"
+                        f"Directory tree contains files, cannot delete (found: {item})",
                     )
         else:
             # Check only immediate children for non-recursive
@@ -534,7 +517,7 @@ async def delete_directory(path: str, recursive: bool = False) -> dict:
                 if item.is_file():
                     return error_response(
                         ErrorCode.CONFLICT,
-                        f"Directory contains files, cannot delete (found: {item})"
+                        f"Directory contains files, cannot delete (found: {item})",
                     )
 
         # 5. Delete directory

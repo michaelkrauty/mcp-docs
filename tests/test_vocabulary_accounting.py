@@ -27,6 +27,8 @@ from mcp_docs.storage.database import DocumentStore
 
 COLLECTION = "test_vocab_accounting"
 
+pytestmark = pytest.mark.usefixtures("embedding_generation")
+
 
 class FakeStorage:
     """Minimal in-memory stand-in for QdrantStorage.
@@ -115,9 +117,7 @@ def _doc_freq(vocab: GlobalVocabulary, token: str) -> int:
     """
     conn = sqlite3.connect(vocab.db_path)
     try:
-        row = conn.execute(
-            "SELECT doc_freq FROM vocabulary WHERE token = ?", (token,)
-        ).fetchone()
+        row = conn.execute("SELECT doc_freq FROM vocabulary WHERE token = ?", (token,)).fetchone()
     finally:
         conn.close()
     return row[0] if row else 0

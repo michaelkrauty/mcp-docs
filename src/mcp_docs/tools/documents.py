@@ -66,8 +66,21 @@ async def register_document(
     # INSERT OR IGNORE).
     existing = store.get_by_hash(content_hash)
     was_registered = existing is not None
-    old_path = existing.path if existing else None
-    old_filename = existing.filename if existing else None
+
+    if existing is not None and existing.path != str(file_path):
+        indexer = await get_document_indexer()
+        async with indexer.collection_operation(write=True):
+            existing = store.get_by_hash(content_hash)
+            document = store.register(path=file_path, content_hash=content_hash, tags=tags or [])
+            if existing is not None:
+                await indexer.update_document_path_in_index(document.id, document.path)
+                if existing.filename != document.filename:
+                    await indexer.update_document_filename_in_index(document)
+        if existing is not None:
+            return {**document.to_dict(), "already_registered": True}
+        processor = await get_document_processor()
+        await processor.enqueue(document.id, file_path)
+        return document.to_dict()
 
     # Register document (atomically handles duplicates)
     document = store.register(
@@ -78,21 +91,6 @@ async def register_document(
 
     # Return with already_registered flag if it was pre-existing
     if was_registered:
-        # register() moves the registry path (and filename) when the same
-        # content is re-registered at a new location, but the Qdrant payloads
-        # still carry the old values. Sync the index (as move_file does) so
-        # search does not return a path/filename that no longer exists while
-        # get_document returns the new one.
-        if old_path is not None and document.path != old_path:
-            try:
-                indexer = await get_document_indexer()
-                await indexer.update_document_path_in_index(
-                    document.id, document.path
-                )
-                if old_filename != document.filename:
-                    await indexer.update_document_filename_in_index(document)
-            except Exception as e:
-                logger.warning(f"Failed to sync index path for {document.id}: {e}")
         return {
             **document.to_dict(),
             "already_registered": True,
@@ -185,17 +183,14 @@ async def update_document_tags(
     if document is None:
         return error_response(ErrorCode.NOT_FOUND, f"Document not found: {document_id}")
 
-    # Update tags (update_tags returns the refreshed document).
-    updated = store.update_tags(uuid, tags)
-
-    # Keep the vector-index payload in sync so tag filters and result metadata
-    # reflect the new tags; otherwise search keeps matching and showing the
-    # document's previous tags until a full reindex.
-    try:
-        indexer = await get_document_indexer()
-        await indexer.update_document_tags_in_index(updated)
-    except Exception as e:
-        logger.warning(f"Failed to sync tags to index for {document_id}: {e}")
+    # Fail before changing source metadata if this process cannot use the index.
+    indexer = await get_document_indexer()
+    async with indexer.collection_operation(write=True):
+        updated = store.update_tags(uuid, tags)
+        try:
+            await indexer.update_document_tags_in_index(updated)
+        except Exception as e:
+            logger.warning(f"Failed to sync tags to index for {document_id}: {e}")
 
     return updated.to_dict()
 
@@ -218,26 +213,27 @@ async def delete_document_artifacts(
     clean up identically; a prior divergence left remove_document_root deleting
     registry rows while orphaning their vector-index points.
     """
-    sources_marked = 0
-    if content_hash:
+    indexer = await get_document_indexer()
+    async with indexer.collection_operation(write=True):
+        sources_marked = 0
+        if content_hash:
+            try:
+                integrity = get_integrity_manager()
+                sources_marked = integrity.mark_document_deleted(content_hash)
+                if sources_marked > 0:
+                    logger.info(
+                        f"Marked {sources_marked} fact sources as deleted "
+                        f"for document {content_hash[:16]}..."
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to mark fact sources as deleted: {e}")
+
         try:
-            integrity = get_integrity_manager()
-            sources_marked = integrity.mark_document_deleted(content_hash)
-            if sources_marked > 0:
-                logger.info(
-                    f"Marked {sources_marked} fact sources as deleted "
-                    f"for document {content_hash[:16]}..."
-                )
+            await indexer.delete_document_index(document_id)
         except Exception as e:
-            logger.warning(f"Failed to mark fact sources as deleted: {e}")
+            logger.warning(f"Failed to delete document index: {e}")
 
-    try:
-        indexer = await get_document_indexer()
-        await indexer.delete_document_index(document_id)
-    except Exception as e:
-        logger.warning(f"Failed to delete document index: {e}")
-
-    store.delete(document_id)
+        store.delete(document_id)
     return sources_marked
 
 

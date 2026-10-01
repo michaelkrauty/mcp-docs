@@ -95,6 +95,14 @@ class DocumentStore(ThreadSafeSQLiteStore):
             )
         """)
 
+        # Worker ownership is independent of mutable document metadata.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS processing_attempts (
+                document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+                token TEXT NOT NULL
+            )
+        """)
+
         # Document tags (one-to-many with documents)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS document_tags (
@@ -118,34 +126,15 @@ class DocumentStore(ThreadSafeSQLiteStore):
         """)
 
         # Indexes
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(content_hash)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(status)")
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_documents_hash "
-            "ON documents(content_hash)"
+            "CREATE INDEX IF NOT EXISTS idx_documents_extraction ON documents(extraction_status)"
         )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_documents_status "
-            "ON documents(status)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_documents_extraction "
-            "ON documents(extraction_status)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_documents_type "
-            "ON documents(doc_type)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_documents_root "
-            "ON documents(document_root)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_tags_document "
-            "ON document_tags(document_id)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_tags_tag "
-            "ON document_tags(tag)"
-        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_type ON documents(doc_type)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_root ON documents(document_root)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tags_document ON document_tags(document_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tags_tag ON document_tags(tag)")
 
         conn.commit()
 
@@ -396,6 +385,47 @@ class DocumentStore(ThreadSafeSQLiteStore):
 
         return self.read(document_id)
 
+    def start_processing_attempt(self, document_id: UUID) -> str:
+        """Assign an immutable token independently of document metadata updates."""
+        conn = self._get_conn()
+        token = str(uuid4())
+        with conn:
+            cursor = conn.execute(
+                "UPDATE documents SET extraction_status = ?, indexed_at = ? WHERE id = ?",
+                (
+                    ExtractionStatus.PROCESSING.value,
+                    datetime.now(UTC).isoformat(),
+                    str(document_id),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise DocumentNotFoundError(f"Document not found: {document_id}")
+            conn.execute(
+                "INSERT INTO processing_attempts(document_id, token) VALUES (?, ?) "
+                "ON CONFLICT(document_id) DO UPDATE SET token = excluded.token",
+                (str(document_id), token),
+            )
+        return token
+
+    def fail_processing_attempt(self, document_id: UUID, attempt: str, error: str) -> bool:
+        """Persist failure only while this exact processing attempt still owns the row."""
+        conn = self._get_conn()
+        cursor = conn.execute(
+            "UPDATE documents SET extraction_status = ?, extraction_error = ?, indexed_at = ? "
+            "WHERE id = ? AND extraction_status = ? AND EXISTS ("
+            "SELECT 1 FROM processing_attempts WHERE document_id = documents.id AND token = ?)",
+            (
+                ExtractionStatus.FAILED.value,
+                error,
+                datetime.now(UTC).isoformat(),
+                str(document_id),
+                ExtractionStatus.PROCESSING.value,
+                attempt,
+            ),
+        )
+        conn.commit()
+        return cursor.rowcount == 1
+
     def update_tags(
         self,
         document_id: UUID,
@@ -576,9 +606,7 @@ class DocumentStore(ThreadSafeSQLiteStore):
         cursor = conn.execute(query, params)
         return [self._row_to_summary(conn, row) for row in cursor.fetchall()]
 
-    def _row_to_summary(
-        self, conn: sqlite3.Connection, row: tuple
-    ) -> DocumentSummary:
+    def _row_to_summary(self, conn: sqlite3.Connection, row: tuple) -> DocumentSummary:
         """Build a DocumentSummary from a row selected with _SUMMARY_COLUMNS.
 
         Shared by list_summaries and iter_summaries so the two can never drift
@@ -862,9 +890,7 @@ class DocumentStore(ThreadSafeSQLiteStore):
 
     def iter_all(
         self,
-        extraction_status: ExtractionStatus
-        | Collection[ExtractionStatus]
-        | None = None,
+        extraction_status: ExtractionStatus | Collection[ExtractionStatus] | None = None,
     ) -> Iterator[Document]:
         """
         Iterate over every document, optionally filtered by extraction status.
@@ -899,8 +925,7 @@ class DocumentStore(ThreadSafeSQLiteStore):
             cursor = conn.execute("SELECT id FROM documents ORDER BY indexed_at DESC")
         elif isinstance(extraction_status, ExtractionStatus):
             cursor = conn.execute(
-                "SELECT id FROM documents WHERE extraction_status = ? "
-                "ORDER BY indexed_at DESC",
+                "SELECT id FROM documents WHERE extraction_status = ? ORDER BY indexed_at DESC",
                 (extraction_status.value,),
             )
         else:
