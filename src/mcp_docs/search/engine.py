@@ -1,22 +1,59 @@
 """Hybrid document search engine using Qdrant."""
 
 import logging
+import re
 from dataclasses import dataclass
 from uuid import UUID
 
-from qdrant_client.models import FieldCondition, Filter, MatchValue
+from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
 from vector_core import (
     EmbeddingClient,
     HybridSearcher,
     QdrantStorage,
 )
 from vector_core.embeddings.global_vocab import GlobalVocabulary
+from vector_core.storage.embedding_fragments import is_derived_fragment
+from vector_core.storage.embedding_sources import stored_embedding_text
 
 from mcp_docs.embedding import EmbeddingCollection, embedding_operation
 from mcp_docs.models import DocumentNotFoundError
 from mcp_docs.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _matched_payload(payload: dict, query: str | None = None) -> dict:
+    """Return bounded evidence without changing the retained canonical source."""
+    marker = payload.get("embedding_fragment")
+    if not marker:
+        return payload
+    result = dict(payload)
+    result["embedding_span"] = {"start": marker["start"], "end": marker["end"]}
+    result["evidence_span"] = dict(result["embedding_span"])
+    result["evidence_kind"] = "embedding_span"
+    if is_derived_fragment(payload):
+        return result
+    text = stored_embedding_text(payload)
+    if text is None:
+        raise ValueError("Indexed fragment has no retained source text")
+    start, end = marker["start"], marker["end"]
+    if query and marker["count"] > 1:
+        # Canonical sparse vectors describe the complete retained source, whereas
+        # their dense vector describes only the first span. Show tail keyword
+        # evidence truthfully without relabeling it as the dense-vector span.
+        terms = list(dict.fromkeys(re.findall(r"\w+", query)))
+        if terms:
+            pattern = re.compile(r"\b(?:" + "|".join(map(re.escape, terms)) + r")\b", re.IGNORECASE)
+            match = pattern.search(text, end)
+            if match:
+                start, end = max(0, match.start() - 200), min(len(text), match.end() + 600)
+                result["evidence_kind"] = "keyword_excerpt"
+                result["evidence_span"] = {"start": start, "end": end}
+    result["content"] = text[start:end]
+    if isinstance(payload.get("char_start"), int):
+        result["char_start"] = payload["char_start"] + start
+        result["char_end"] = payload["char_start"] + end
+    return result
 
 
 def _normalize_tag_filters(tags: list[str]) -> list[str]:
@@ -45,6 +82,11 @@ class SearchResult:
     tags: list[str]
     chunk_index: int | None = None
     section_title: str | None = None
+    char_start: int | None = None
+    char_end: int | None = None
+    embedding_span: dict[str, int] | None = None
+    evidence_span: dict[str, int] | None = None
+    evidence_kind: str | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -63,6 +105,14 @@ class SearchResult:
             result["chunk_index"] = self.chunk_index
         if self.section_title:
             result["section_title"] = self.section_title
+        if self.char_start is not None:
+            result["char_start"] = self.char_start
+        if self.char_end is not None:
+            result["char_end"] = self.char_end
+        if self.embedding_span is not None:
+            result["embedding_span"] = self.embedding_span
+            result["evidence_span"] = self.evidence_span
+            result["evidence_kind"] = self.evidence_kind
         return result
 
 
@@ -146,18 +196,21 @@ class DocumentSearchEngine(EmbeddingCollection):
             limit: Maximum results to return
             doc_type: Filter by document type
             tags: Filter by tags (document must have ALL tags)
-            include_chunks: If True, search chunks too. If False, only document summaries.
+            include_chunks: If True, return matching passages and auxiliary metadata.
+                If False, group content matches into one result per document.
 
         Returns:
             List of SearchResult ordered by relevance
         """
         await self._ensure_components()
 
-        # Build filter conditions
-        filter_conditions: list[FieldCondition] = []
+        if not query.strip():
+            raise ValueError("Search query cannot be blank")
 
-        if not include_chunks:
-            filter_conditions.append(FieldCondition(key="type", match=MatchValue(value="document")))
+        # Build filter conditions
+        filter_conditions: list[FieldCondition] = [
+            FieldCondition(key="type", match=MatchAny(any=["document", "doc_chunk"]))
+        ]
 
         if doc_type:
             filter_conditions.append(
@@ -181,12 +234,13 @@ class DocumentSearchEngine(EmbeddingCollection):
             sparse_query=sparse_vector,
             filter_conditions=filter_conditions if filter_conditions else None,
             limit=limit,
+            group_by=None if include_chunks else "document_id",
         )
 
         # Convert to SearchResult objects
         search_results = []
         for result in results:
-            payload = result.payload
+            payload = _matched_payload(result.payload, query)
             try:
                 doc_id = UUID(payload.get("document_id", ""))
             except (ValueError, TypeError):
@@ -206,6 +260,11 @@ class DocumentSearchEngine(EmbeddingCollection):
                     tags=payload.get("tags", []),
                     chunk_index=payload.get("chunk_index"),
                     section_title=payload.get("section_title"),
+                    char_start=payload.get("char_start"),
+                    char_end=payload.get("char_end"),
+                    embedding_span=payload.get("embedding_span"),
+                    evidence_span=payload.get("evidence_span"),
+                    evidence_kind=payload.get("evidence_kind"),
                 )
             )
 
@@ -238,85 +297,98 @@ class DocumentSearchEngine(EmbeddingCollection):
         if self.storage is None:
             raise RuntimeError("Storage not initialized. Call _ensure_components() first.")
 
-        # First, get the document's summary point using scroll_points
-        results = await self.storage.scroll_points(
-            self.collection_name,
-            filter_conditions=[
-                FieldCondition(key="type", match=MatchValue(value="document")),
-                FieldCondition(key="document_id", match=MatchValue(value=str(document_id))),
-            ],
-            limit=1,
-        )
-
-        if not results:
-            raise DocumentNotFoundError(f"Document not found in index: {document_id}")
-
-        # Get the dense vector - we need to retrieve the point with vectors
-        # Use the Qdrant client directly for vector retrieval
         client = await self.storage.get_client()
-
-        # Get the point ID from scroll - we need to look up by filter
-        scroll_result = await client.scroll(
-            self.collection_name,
-            scroll_filter=Filter(
-                must=[
-                    FieldCondition(key="type", match=MatchValue(value="document")),
-                    FieldCondition(key="document_id", match=MatchValue(value=str(document_id))),
-                ]
-            ),
-            limit=1,
-            with_vectors=True,
+        document_filter = FieldCondition(
+            key="document_id", match=MatchValue(value=str(document_id))
         )
-
-        points, _ = scroll_result
-        if not points:
-            raise DocumentNotFoundError(f"Document not found in index: {document_id}")
-
-        source_point = points[0]
-
-        # Get the dense vector from the source point
-        vectors = source_point.vector
-        if isinstance(vectors, dict):
-            dense_vector = vectors.get("dense", [])
-        else:
-            dense_vector = vectors or []
-
-        if not dense_vector:
-            logger.warning(f"No dense vector for document: {document_id}")
+        chunk_filter = FieldCondition(key="type", match=MatchValue(value="doc_chunk"))
+        target_filter = Filter(
+            must=[chunk_filter],
+            must_not=[document_filter] if exclude_same_document else None,
+        )
+        best: dict[UUID, tuple[float, int | str]] = {}
+        offset = None
+        found_source = False
+        while True:
+            points, offset = await client.scroll(
+                self.collection_name,
+                scroll_filter=Filter(must=[chunk_filter, document_filter]),
+                limit=128,
+                offset=offset,
+                with_vectors=["dense"],
+                with_payload=False,
+            )
+            for source_point in points:
+                found_source = True
+                vectors = source_point.vector
+                dense = vectors.get("dense") if isinstance(vectors, dict) else vectors
+                if not isinstance(dense, list) or not dense:
+                    raise RuntimeError(f"Source passage {source_point.id} has no dense vector")
+                # Each query requests distinct documents before applying its limit.
+                # A document's final score is its strongest passage-pair match.
+                grouped = await client.query_points_groups(
+                    self.collection_name,
+                    query=dense,
+                    using="dense",
+                    group_by="document_id",
+                    group_size=1,
+                    limit=limit,
+                    query_filter=target_filter,
+                    with_payload=False,
+                )
+                for group in grouped.groups:
+                    try:
+                        doc_uuid = UUID(str(group.id))
+                    except (ValueError, TypeError):
+                        continue
+                    for point in group.hits:
+                        score = point.score or 0.0
+                        if doc_uuid in best and best[doc_uuid][0] >= score:
+                            continue
+                        point_id = str(point.id) if isinstance(point.id, UUID) else point.id
+                        best[doc_uuid] = (score, point_id)
+                # Only the best requested documents need retaining between queries.
+                best = dict(sorted(best.items(), key=lambda item: item[1][0], reverse=True)[:limit])
+            if offset is None:
+                break
+        if not found_source:
+            existing, _ = await client.scroll(
+                self.collection_name,
+                scroll_filter=Filter(
+                    must=[
+                        document_filter,
+                        FieldCondition(key="type", match=MatchAny(any=["document", "doc_chunk"])),
+                    ]
+                ),
+                limit=1,
+                with_payload=False,
+                with_vectors=False,
+            )
+            if not existing:
+                raise DocumentNotFoundError(f"Document not found in index: {document_id}")
+        if not best:
             return []
-
-        # Build filter conditions for similar search
-        filter_conditions: list[FieldCondition] = [
-            FieldCondition(key="type", match=MatchValue(value="document"))
-        ]
-
-        # Perform vector search using query_dense
-        similar = await self.storage.query_dense(
-            collection=self.collection_name,
-            query_vector=dense_vector,
-            filter_conditions=filter_conditions,
-            limit=limit + (1 if exclude_same_document else 0),
+        # A canonical target may retain a very large body. Hydrate winners once,
+        # rather than transferring the same body for every source-vector query.
+        retained = await client.retrieve(
+            self.collection_name,
+            ids=[point_id for _, point_id in best.values()],
+            with_payload=True,
+            with_vectors=False,
         )
-
-        # Convert to SearchResult objects
-        search_results = []
-        for point in similar:
-            payload = point.payload or {}
-            result_doc_id = payload.get("document_id", "")
-
-            # Skip same document if requested
-            if exclude_same_document and result_doc_id == str(document_id):
-                continue
-
-            try:
-                doc_uuid = UUID(result_doc_id)
-            except (ValueError, TypeError):
-                continue
-
-            search_results.append(
+        payloads = {
+            str(point.id) if isinstance(point.id, UUID) else point.id: point.payload or {}
+            for point in retained
+        }
+        results = []
+        for doc_uuid, (score, point_id) in best.items():
+            if point_id not in payloads:
+                raise RuntimeError("Similarity result changed during retrieval; retry the search")
+            payload = _matched_payload(payloads[point_id])
+            results.append(
                 SearchResult(
                     document_id=doc_uuid,
-                    score=point.score or 0.0,
+                    score=score,
                     content=payload.get("content", ""),
                     point_type=payload.get("type", "unknown"),
                     filename=payload.get("filename", ""),
@@ -326,13 +398,14 @@ class DocumentSearchEngine(EmbeddingCollection):
                     tags=payload.get("tags", []),
                     chunk_index=payload.get("chunk_index"),
                     section_title=payload.get("section_title"),
+                    char_start=payload.get("char_start"),
+                    char_end=payload.get("char_end"),
+                    embedding_span=payload.get("embedding_span"),
+                    evidence_span=payload.get("evidence_span"),
+                    evidence_kind=payload.get("evidence_kind"),
                 )
             )
-
-            if len(search_results) >= limit:
-                break
-
-        return search_results
+        return results
 
     @embedding_operation()
     async def get_document_chunks(
@@ -359,10 +432,13 @@ class DocumentSearchEngine(EmbeddingCollection):
                 FieldCondition(key="document_id", match=MatchValue(value=str(document_id))),
             ],
             limit=1000,
+            max_results=0,
         )
 
         chunks = []
         for payload in results:
+            if is_derived_fragment(payload):
+                continue
             try:
                 doc_uuid = UUID(payload.get("document_id", ""))
             except (ValueError, TypeError):
@@ -381,6 +457,8 @@ class DocumentSearchEngine(EmbeddingCollection):
                     tags=payload.get("tags", []),
                     chunk_index=payload.get("chunk_index"),
                     section_title=payload.get("section_title"),
+                    char_start=payload.get("char_start"),
+                    char_end=payload.get("char_end"),
                 )
             )
 

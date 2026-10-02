@@ -18,7 +18,7 @@ Supports stateless MCP `2026-07-28` requests and legacy MCP clients from the sam
 Requires [vector-core](https://github.com/michaelkrauty/vector-core).
 
 ```bash
-pip install git+https://github.com/michaelkrauty/vector-core.git@v1.6.1
+pip install git+https://github.com/michaelkrauty/vector-core.git@v1.7.0
 pip install git+https://github.com/michaelkrauty/mcp-docs.git
 ```
 
@@ -236,9 +236,17 @@ Plus inherited vector-core settings (`VECTOR_QDRANT_URL`, `VECTOR_EMBEDDING_URL`
 
 Change the vector-core embedding configuration and restart the server. The first index or search operation builds a compatible physical collection from persisted embedding text before using it. Changing the model, endpoint, dimension or deployment namespace triggers migration, including same-dimension model changes. Set a new `VECTOR_EMBEDDING_CACHE_NAMESPACE` when an unchanged model alias serves different weights or behavior; the embeddings protocol cannot detect that change automatically.
 
-Migration preserves document IDs, metadata, processing states, hashes and sparse vectors. Existing chunks are re-embedded from Qdrant content, so unavailable source files do not prevent migration. Shared glossary entries use their full stored definitions. Incomplete migrations do not replace the active generation, and previous collections remain available for recovery. Updated writers serialize with migration; restart all clients sharing a collection when changing configuration.
+Migration preserves document IDs, metadata, processing states, hashes and canonical sparse vectors. Existing chunks are re-embedded from retained Qdrant content, so unavailable source files do not prevent migration. Oversized inputs gain searchable fragments with exact source spans; the original payload is retained once rather than copied into every fragment. Shared glossary entries use their full retained definitions. Incomplete migrations do not replace the active generation, and previous collections remain available for recovery. Updated writers serialize with migration; restart all clients sharing a collection when changing configuration.
 
-Install the optional `tokenizer` extra for model-token-aware input budgeting (`uv sync --extra tokenizer` in a checkout). Configure vector-core with a local tokenizer file and the model's input-token limit. Tokenization uses the local file; embedding calls do not download tokenizer artifacts. Without the extra, vector-core uses its conservative dependency-free input budget.
+### Content coverage and result semantics
+
+Document passages preserve exact extracted-text slices, including headings and oversized section or paragraph tails. Every retained source span is embedded within the configured model's exact token budget; request batching handles transport limits separately. Search results show the matching passage and source character offsets when available. Fragment results also expose `embedding_span` and `evidence_span`, relative to their canonical retained chunk. A canonical sparse match can describe text beyond its first dense span: `evidence_kind="keyword_excerpt"` explicitly identifies a query-matching excerpt from that retained text, without claiming it is the dense-vector span. `get_document_chunks` returns complete canonical retained chunks, excluding derived search fragments. Character offsets refer to extracted text, not bytes or positions in the original PDF or office file; older retained chunks may not have original-document offsets.
+
+`search_documents(include_chunks=False)` searches document content and groups matches into one result per document. The default passage mode can return several matches from the same document. Filename, title and tag summaries provide auxiliary metadata matches in both modes. `find_similar_documents` compares every indexed source passage against other documents' passages and ranks each document by its best passage-pair similarity, excluding the source document before retrieval. It does not replace body content with metadata summaries or average away distinctive tails.
+
+Coverage applies to retained or newly extracted text. Migration cannot recreate text omitted by an earlier extractor or chunker when the source file is unavailable. Incremental source-backed indexing repairs old document layouts once when originals are available; matching current-layout hashes skip subsequent extraction. Metadata-only updates do not certify body repair. Missing originals are listed in `unavailable_sources` with document IDs and paths, and their retained index is left unchanged. OCR page limits and extraction failures can leave unextracted source content; notebook outputs are not part of the extracted text. Legacy note metadata in a shared collection is not a recovered note body. Force reindexing still requires the original files; embedding migration uses retained text instead.
+
+Install the optional `tokenizer` extra for model-token-aware input budgeting (`uv sync --extra tokenizer` in a checkout). Configure vector-core with a local tokenizer file, the model's input-token limit and the serving backend's special-token policy. Role prefixes count toward that limit. Tokenization uses the local file; embedding calls do not download tokenizer artifacts. No model-token limit is inferred without this configuration. Explicit character or byte limits can also bound source fragments, and backend input rejections are reported rather than silently truncating content.
 
 ## Integration with mcp-notes
 

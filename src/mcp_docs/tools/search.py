@@ -9,7 +9,7 @@ Tools:
 
 import logging
 
-from qdrant_client.models import FieldCondition, Filter, MatchText, MatchValue
+from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchText, MatchValue
 from vector_core import parse_uuid_or_none, validate_limit
 from vector_core.errors import ErrorCode, error_response
 
@@ -39,13 +39,16 @@ async def search_documents(
         limit: Maximum results to return (default 10)
         doc_type: Filter by document type (pdf, docx, txt, md, etc.)
         tags: Filter by tags (document must have ALL tags)
-        include_chunks: If True, search within document chunks.
-            If False, only match whole documents.
+        include_chunks: If True, return matching passages and auxiliary metadata.
+            If False, return one best matching passage or metadata result per
+            document. Both modes search document content.
 
     Returns:
         List of search results with relevance scores, or an error dict on
         invalid input.
     """
+    if not query.strip():
+        return error_response(ErrorCode.VALIDATION_FAILED, "Search query cannot be blank")
     doc_type_value, doc_type_error = validate_doc_type(doc_type)
     if doc_type_error is not None:
         return doc_type_error
@@ -117,7 +120,7 @@ async def keyword_search(
         should_conditions.append(FieldCondition(key="filename", match=MatchText(text=keyword)))
 
     # Build must conditions for additional filters
-    must_conditions = []
+    must_conditions = [FieldCondition(key="type", match=MatchAny(any=["document", "doc_chunk"]))]
     if doc_type_value:
         must_conditions.append(
             FieldCondition(key="doc_type", match=MatchValue(value=doc_type_value))
@@ -133,11 +136,9 @@ async def keyword_search(
     # summary point plus one per chunk per document), so a single over-fetched
     # page can be filled by a few content-heavy documents whose chunks all match,
     # leaving other matching documents undiscovered. Following the scroll offset
-    # avoids silently dropping them; the total points scanned is bounded to
-    # protect memory and latency.
+    # avoids silently dropping them. Pages bound memory without limiting coverage.
     scroll_filter = Filter(**filter_dict)
     page_size = min(max(limit * 2, 64), 512)
-    max_scan = max(limit * 20, 2000)
     # Return only the metadata fields the result uses. Fetching every scanned
     # chunk point's full `content` body while paginating would transfer large
     # text the result never reads, which is costly on the content-heavy matches
@@ -149,19 +150,16 @@ async def keyword_search(
     seen_docs: set[str] = set()
     results: list[dict] = []
     offset = None
-    scanned = 0
-
-    while len(results) < limit and scanned < max_scan:
+    while len(results) < limit:
         points, offset = await client.scroll(
             collection_name,
             scroll_filter=scroll_filter,
-            limit=min(page_size, max_scan - scanned),
+            limit=page_size,
             offset=offset,
             with_payload=payload_fields,
         )
         if not points:
             break
-        scanned += len(points)
 
         for point in points:
             payload = point.payload or {}
@@ -188,16 +186,6 @@ async def keyword_search(
         if offset is None:
             break
 
-    if len(results) < limit and scanned >= max_scan:
-        logger.debug(
-            "keyword_search hit the %d-point scan cap with %d/%d documents for "
-            "keyword %r; more matches may exist",
-            max_scan,
-            len(results),
-            limit,
-            keyword,
-        )
-
     return results
 
 
@@ -209,7 +197,9 @@ async def find_similar_documents(
     """
     Find documents similar to a given document.
 
-    Uses vector similarity to find semantically related documents.
+    Compares every indexed source passage with other documents' passages.
+    Each document is ranked by its best passage-pair similarity; metadata
+    summaries are auxiliary and are not substituted for document content.
 
     Args:
         document_id: Document UUID string

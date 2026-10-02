@@ -327,6 +327,7 @@ class TestDocumentSearchEngineFindSimilar:
         engine = DocumentSearchEngine(collection_name="test")
         mock_storage = AsyncMock()
         mock_storage.scroll_points.return_value = []  # summary point not in index
+        mock_storage.get_client.return_value.scroll.return_value = ([], None)
         engine.storage = mock_storage
 
         with pytest.raises(DocumentNotFoundError):
@@ -346,16 +347,16 @@ class TestDocumentSearchEngineFindSimilar:
         source_point.vector = {"dense": [0.1, 0.2, 0.3]}
         mock_client = AsyncMock()
         mock_client.scroll.return_value = ([source_point], None)
+        mock_client.query_points_groups.return_value.groups = []
         mock_storage.get_client.return_value = mock_client
-        # the only candidate is the same document, excluded -> no neighbors
-        same = MagicMock()
-        same.payload = {"document_id": str(doc_id), "type": "document"}
-        same.score = 1.0
-        mock_storage.query_dense.return_value = [same]
+        # Self-exclusion happens in the grouped query, before its result limit.
         engine.storage = mock_storage
 
         results = await engine.find_similar(document_id=doc_id, exclude_same_document=True)
         assert results == []
+        assert mock_client.query_points_groups.await_args.kwargs["query_filter"].must_not[
+            0
+        ].match.value == str(doc_id)
 
 
 class TestFindSimilarDocumentsTool:
