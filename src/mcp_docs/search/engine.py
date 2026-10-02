@@ -1,5 +1,6 @@
 """Hybrid document search engine using Qdrant."""
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ def _matched_payload(payload: dict, query: str | None = None) -> dict:
     result["evidence_span"] = dict(result["embedding_span"])
     result["evidence_kind"] = "embedding_span"
     if is_derived_fragment(payload):
+        # Core's child projection already composes document-relative character offsets.
         return result
     text = stored_embedding_text(payload)
     if text is None:
@@ -318,36 +320,54 @@ class DocumentSearchEngine(EmbeddingCollection):
                 with_vectors=["dense"],
                 with_payload=False,
             )
+            dense_vectors = []
             for source_point in points:
                 found_source = True
                 vectors = source_point.vector
                 dense = vectors.get("dense") if isinstance(vectors, dict) else vectors
                 if not isinstance(dense, list) or not dense:
                     raise RuntimeError(f"Source passage {source_point.id} has no dense vector")
-                # Each query requests distinct documents before applying its limit.
+                dense_vectors.append(dense)
+            # Query every vector in page-local batches, never averaging or capping sources.
+            # Self exclusion happens before document grouping and each query's limit.
+            # Resolve the operation's physical collection before creating child tasks.
+            for start in range(0, len(dense_vectors), 8):
+                tasks = [
+                    asyncio.create_task(
+                        client.query_points_groups(
+                            self.collection_name,
+                            query=dense,
+                            using="dense",
+                            group_by="document_id",
+                            group_size=1,
+                            limit=limit,
+                            query_filter=target_filter,
+                            with_payload=False,
+                        )
+                    )
+                    for dense in dense_vectors[start : start + 8]
+                ]
+                try:
+                    grouped_results = await asyncio.gather(*tasks)
+                except BaseException:
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    raise
                 # A document's final score is its strongest passage-pair match.
-                grouped = await client.query_points_groups(
-                    self.collection_name,
-                    query=dense,
-                    using="dense",
-                    group_by="document_id",
-                    group_size=1,
-                    limit=limit,
-                    query_filter=target_filter,
-                    with_payload=False,
-                )
-                for group in grouped.groups:
-                    try:
-                        doc_uuid = UUID(str(group.id))
-                    except (ValueError, TypeError):
-                        continue
-                    for point in group.hits:
-                        score = point.score or 0.0
-                        if doc_uuid in best and best[doc_uuid][0] >= score:
+                for grouped in grouped_results:
+                    for group in grouped.groups:
+                        try:
+                            doc_uuid = UUID(str(group.id))
+                        except (ValueError, TypeError):
                             continue
-                        point_id = str(point.id) if isinstance(point.id, UUID) else point.id
-                        best[doc_uuid] = (score, point_id)
-                # Only the best requested documents need retaining between queries.
+                        for point in group.hits:
+                            score = point.score or 0.0
+                            if doc_uuid in best and best[doc_uuid][0] >= score:
+                                continue
+                            point_id = str(point.id) if isinstance(point.id, UUID) else point.id
+                            best[doc_uuid] = (score, point_id)
+                # Only the best requested documents need retaining between batches.
                 best = dict(sorted(best.items(), key=lambda item: item[1][0], reverse=True)[:limit])
             if offset is None:
                 break

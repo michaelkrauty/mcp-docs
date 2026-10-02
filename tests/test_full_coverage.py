@@ -453,7 +453,7 @@ async def test_normal_indexing_bounds_serialized_writes_before_pruning(
         count = await indexer.index_document(document.id, source)
         assert count > 30
         assert sum(sizes) > 10_000
-        assert operations[-1] == "prune old tail"
+        assert operations[-2:] == ["prune old tail", "write"]
         chunks = await DocumentSearchEngine(
             storage, PassageEmbedder(), vocab, "coverage"
         ).get_document_chunks(document.id)

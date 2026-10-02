@@ -19,7 +19,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from qdrant_client.models import FieldCondition, PointStruct
+from qdrant_client.models import FieldCondition, Filter, PointStruct
 from vector_core import GlobalVocabulary
 
 from mcp_docs.indexing.indexer import DOCS_CODEBASE_ID, DocumentIndexer
@@ -45,6 +45,15 @@ class FakeStorage:
 
     async def get_client(self):
         return self
+
+    async def update_payload(self, collection, filter_conditions, payload):
+        matches, _ = await self.scroll(
+            collection,
+            scroll_filter=Filter(must=filter_conditions),
+            limit=max(1, len(self.points)),
+        )
+        for point in matches:
+            point.payload.update(payload)
 
     async def retrieve(self, collection, ids, **kwargs):
         return [self.points[point_id] for point_id in ids if point_id in self.points]

@@ -30,6 +30,7 @@ from vector_core.storage.embedding_fragments import (
     is_derived_fragment,
     upsert_fragment_group,
 )
+from vector_core.utils.hashing import compute_file_hash
 
 from mcp_docs.embedding import EmbeddingCollection, embedding_operation
 from mcp_docs.extraction.extractor import extract_content
@@ -354,7 +355,11 @@ class DocumentIndexer(EmbeddingCollection):
                     continue
 
                 # Re-extract content for indexing
+                if doc.extraction_status == ExtractionStatus.INDEXED:
+                    self._verify_registered_source(doc)
                 extracted = extract_content(path, DocumentType(doc.doc_type))
+                if doc.extraction_status == ExtractionStatus.INDEXED:
+                    self._verify_registered_source(doc)
                 summary, chunks = self._split_document(doc, extracted.text)
                 units[doc.id] = (summary, chunks)
 
@@ -400,6 +405,8 @@ class DocumentIndexer(EmbeddingCollection):
 
                 # Create both summary AND chunk points (like index_document does)
                 points = await self._build_points(doc, summary, chunks)
+                if doc.extraction_status == ExtractionStatus.INDEXED:
+                    self._verify_registered_source(doc)
                 await self._replace_document_points(doc.id, points)
 
                 total_points += len(points)
@@ -424,6 +431,21 @@ class DocumentIndexer(EmbeddingCollection):
             "errors": extraction_errors if extraction_errors else None,
             "unavailable_sources": unavailable_sources,
         }
+
+    @staticmethod
+    def _verify_registered_source(document: Document) -> None:
+        """Repair only the registered file identity, including after extraction."""
+        try:
+            current_hash = compute_file_hash(Path(document.path))
+        except OSError as error:
+            raise ExtractionError(
+                "Source became unavailable during repair; rescan the document before retrying"
+            ) from error
+        if current_hash != document.content_hash:
+            raise ExtractionError(
+                "Source hash differs from registration; "
+                "rescan the document before repairing its index"
+            )
 
     async def _register_batch_vocabulary(
         self,
@@ -780,16 +802,28 @@ class DocumentIndexer(EmbeddingCollection):
             if isinstance(parent_id, UUID):
                 parent_id = str(parent_id)
             groups.setdefault(parent_id, []).append(point)
-        # The summary carries the source-layout cache key. Publish it only after
-        # every body group succeeds, so a failed partial write is retried.
+        # Invalidate an existing completion marker before any partial update.
+        # The final summary publishes it only after body writes and stale-ID cleanup.
+        await self.storage.update_payload(
+            self.collection_name,
+            filter_conditions=[
+                FieldCondition(key="document_id", match=MatchValue(value=str(document_id))),
+                FieldCondition(key="type", match=MatchValue(value="document")),
+            ],
+            payload={"source_layout": None},
+        )
         ordered = sorted(
             groups.values(), key=lambda group: (group[0].payload or {}).get("type") == "document"
         )
+        summaries = []
         for group in ordered:
             group.sort(
                 key=lambda point: (fragment_marker(point.payload or {}) or {}).get("index", 0)
             )
-            await upsert_fragment_group(self.storage, self.collection_name, group)
+            if (group[0].payload or {}).get("type") == "document":
+                summaries.append(group)
+            else:
+                await upsert_fragment_group(self.storage, self.collection_name, group)
 
         client = await self.storage.get_client()
         offset = None
@@ -817,6 +851,8 @@ class DocumentIndexer(EmbeddingCollection):
                 )
             if offset is None:
                 break
+        for group in summaries:
+            await upsert_fragment_group(self.storage, self.collection_name, group)
 
     @embedding_operation(write=True)
     async def update_document_path_in_index(self, document_id: UUID, new_path: str) -> None:

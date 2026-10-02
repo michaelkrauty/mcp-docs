@@ -370,6 +370,7 @@ class TestDocumentIndexerAtomicReindex:
             )
             client.delete.side_effect = delete_points
             fake_storage.get_client = AsyncMock(return_value=client)
+            fake_storage.update_payload = AsyncMock()
             monkeypatch.setattr("mcp_docs.indexing.indexer.upsert_fragment_group", upsert_points)
             fake_vocab = MagicMock()
             fake_vocab.get_codebase_doc_count.return_value = 1
@@ -385,7 +386,7 @@ class TestDocumentIndexerAtomicReindex:
 
             assert await indexer.index_document(doc.id, "shorter replacement") == 2
 
-            assert call_order == ["create", "upsert", "upsert", "delete"]
+            assert call_order == ["create", "upsert", "delete", "upsert"]
             assert stored_points == {point.id for point in replacement_points}
             assert store.read(doc.id).extraction_status == ExtractionStatus.INDEXED
         finally:
@@ -445,6 +446,7 @@ class TestDocumentIndexerAtomicReindex:
         client.scroll.return_value = ([SimpleNamespace(id="stale")], None)
         client.delete.side_effect = RuntimeError("delete unavailable")
         fake_storage.get_client = AsyncMock(return_value=client)
+        fake_storage.update_payload = AsyncMock()
         upsert = AsyncMock()
         monkeypatch.setattr("mcp_docs.indexing.indexer.upsert_fragment_group", upsert)
         indexer = DocumentIndexer(
@@ -457,7 +459,7 @@ class TestDocumentIndexerAtomicReindex:
 
         doc_id = uuid4()
         point = SimpleNamespace(
-            id="replacement", payload={"document_id": str(doc_id), "type": "document"}
+            id="replacement", payload={"document_id": str(doc_id), "type": "doc_chunk"}
         )
         with pytest.raises(RuntimeError, match="delete unavailable"):
             await indexer._replace_document_points(doc_id, [point])
