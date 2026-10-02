@@ -19,10 +19,6 @@ R = TypeVar("R")
 
 async def document_embedding_text(payload: dict[str, Any]) -> str:
     """Recover exact stored document text without reopening source files."""
-    if payload.get("type") in {"document", "doc_chunk"}:
-        text = payload.get("content")
-        if isinstance(text, str):
-            return text
     return await resolve_shared_embedding_text(payload)
 
 

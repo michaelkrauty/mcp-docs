@@ -589,7 +589,7 @@ class DocumentIndexer(EmbeddingCollection):
             "type": point_type,
             "document_id": str(document.id),
             "content": content,
-            "embedding_text": content,
+            "embedding_text_field": "content",
             "content_hash": document.content_hash,
             "filename": document.filename,
             "path": document.path,

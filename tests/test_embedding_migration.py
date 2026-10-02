@@ -1,6 +1,7 @@
 """Document operations must never query or mutate an incompatible generation."""
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -139,7 +140,7 @@ async def test_index_document_persists_input_and_uses_one_locked_generation(
     async def upsert(collection, points):
         assert events == ["locked", "resolved"]
         assert collection == "documents_generation_new"
-        assert [p.payload["embedding_text"] for p in points] == [
+        assert [p.payload[p.payload["embedding_text_field"]] for p in points] == [
             doc.filename,
             "Previously extracted text",
         ]
@@ -165,7 +166,8 @@ async def test_summary_refresh_binds_generation(method, routing, document_store,
     assert storage.update_payload.await_args.args[0] == "documents_generation_new"
     collection, points = storage.upsert_batch.await_args.args
     assert collection == "documents_generation_new"
-    assert points[0].payload["embedding_text"] == points[0].payload["content"]
+    assert points[0].payload["embedding_text_field"] == "content"
+    assert "embedding_text" not in points[0].payload
 
 
 async def test_delete_and_chunk_reads_bind_generation(routing):
@@ -200,6 +202,63 @@ async def test_document_text_uses_persisted_content_without_source(kind):
         )
         == "Full stored content"
     )
+
+
+async def test_large_document_point_retains_one_copy_of_embedding_input(
+    document_store, sample_text
+):
+    from qdrant_client.http.models import PointsList
+
+    doc = document_store.register(sample_text)
+    storage, embedder, vocab = components()
+    indexer = DocumentIndexer(document_store, storage, embedder, vocab, "documents")
+    content = "Retained document evidence.\n" * 700_000
+    point = indexer._create_point("doc_chunk", doc, content, [1.0, 0.0], chunk_index=0)
+    payload = point.payload
+    assert payload["embedding_text_field"] == "content"
+    assert "embedding_text" not in payload
+    assert payload["content"] == content
+    encoded = PointsList(points=[point]).model_dump_json().encode()
+    # A second copy of this source input would exceed the common 32 MiB limit.
+    assert len(encoded) < 32 * 1024 * 1024
+    assert 2 * len(json.dumps(content).encode()) > 32 * 1024 * 1024
+    restored = json.loads(encoded)["points"][0]["payload"]
+    assert await document_embedding_text(restored) == content
+
+
+async def test_document_reference_contract_precedence_and_invalid_reference():
+    from vector_core.storage.embedding_migration import EmbeddingMigrationError
+
+    assert (
+        await document_embedding_text(
+            {
+                "type": "document",
+                "embedding_text_field": "retained",
+                "retained": "Exact input",
+                "content": "Different display content",
+            }
+        )
+        == "Exact input"
+    )
+    assert (
+        await document_embedding_text(
+            {
+                "type": "document",
+                "embedding_text": "Explicit input",
+                "embedding_text_field": "missing",
+                "content": "Display content",
+            }
+        )
+        == "Explicit input"
+    )
+    with pytest.raises(EmbeddingMigrationError):
+        await document_embedding_text(
+            {
+                "type": "document",
+                "embedding_text_field": "missing",
+                "content": "Display content",
+            }
+        )
 
 
 async def test_shared_payload_resolves_via_authoritative_store(monkeypatch):

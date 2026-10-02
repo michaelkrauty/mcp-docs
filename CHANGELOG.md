@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1] - 2026-10-01
+
+### Fixed
+
+- Store document embedding input as a reference to the existing content field instead of duplicating large payloads. Retained content remains complete and available for future model migrations.
+- Pin vector-core to v1.6.1, which bounds migration writes by serialized request size and avoids duplicating retained content during migration.
+
 ## [1.4.0] - 2026-10-01
 
 ### Added
