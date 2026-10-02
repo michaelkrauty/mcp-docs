@@ -1,5 +1,6 @@
 """Document indexer for Qdrant with hybrid search support."""
 
+import asyncio
 import hashlib
 import logging
 from collections.abc import Iterable
@@ -356,10 +357,10 @@ class DocumentIndexer(EmbeddingCollection):
 
                 # Re-extract content for indexing
                 if doc.extraction_status == ExtractionStatus.INDEXED:
-                    self._verify_registered_source(doc)
+                    await self._verify_registered_source(doc)
                 extracted = extract_content(path, DocumentType(doc.doc_type))
                 if doc.extraction_status == ExtractionStatus.INDEXED:
-                    self._verify_registered_source(doc)
+                    await self._verify_registered_source(doc)
                 summary, chunks = self._split_document(doc, extracted.text)
                 units[doc.id] = (summary, chunks)
 
@@ -406,7 +407,7 @@ class DocumentIndexer(EmbeddingCollection):
                 # Create both summary AND chunk points (like index_document does)
                 points = await self._build_points(doc, summary, chunks)
                 if doc.extraction_status == ExtractionStatus.INDEXED:
-                    self._verify_registered_source(doc)
+                    await self._verify_registered_source(doc)
                 await self._replace_document_points(doc.id, points)
 
                 total_points += len(points)
@@ -433,10 +434,10 @@ class DocumentIndexer(EmbeddingCollection):
         }
 
     @staticmethod
-    def _verify_registered_source(document: Document) -> None:
+    async def _verify_registered_source(document: Document) -> None:
         """Repair only the registered file identity, including after extraction."""
         try:
-            current_hash = compute_file_hash(Path(document.path))
+            current_hash = await asyncio.to_thread(compute_file_hash, Path(document.path))
         except OSError as error:
             raise ExtractionError(
                 "Source became unavailable during repair; rescan the document before retrying"

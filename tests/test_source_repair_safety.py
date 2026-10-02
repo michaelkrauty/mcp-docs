@@ -1,5 +1,7 @@
 """Failed cleanup and changed files must never certify a completed layout repair."""
 
+import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -11,6 +13,30 @@ from mcp_docs.models import ExtractedContent, ExtractionStatus
 from tests.test_vocabulary_accounting import FakeEmbedder, FakeStorage
 
 pytestmark = pytest.mark.usefixtures("embedding_generation")
+
+
+async def test_registered_source_hash_does_not_block_event_loop(
+    document_store, sample_text, monkeypatch
+):
+    document = document_store.register(sample_text)
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = threading.Event()
+
+    def slow_hash(path):
+        assert path == sample_text
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(2), "Event loop could not release the hash worker"
+        return document.content_hash
+
+    monkeypatch.setattr("mcp_docs.indexing.indexer.compute_file_hash", slow_hash)
+    verification = asyncio.create_task(DocumentIndexer._verify_registered_source(document))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        assert not verification.done()
+    finally:
+        release.set()
+        await verification
 
 
 def prepared(document_store, sample_text, monkeypatch, layout=None):
