@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.5.0] - 2026-10-02
+
+### Fixed
+
+- Preserve exact extracted-text slices, including headings, whitespace and oversized paragraph or section tails. Persist source character spans and embed every span through bounded searchable fragments instead of truncating oversized inputs.
+- Restrict document searches to document records before retrieval. Enumerate all retained chunks and keyword matches without a hidden total scan cap.
+- Version source layouts so incremental indexing repairs historical chunking once from available originals, skips unchanged current layouts, and reports unavailable originals while preserving their retained index. Metadata-only summary refreshes preserve the body's layout status.
+- Write replacement groups through serialized-byte-bounded upserts before pruning obsolete document points. Invalidate previous completion markers and publish the source-layout cache key only after body writes and obsolete-point cleanup succeed, so failed cleanup remains retryable.
+- Verify registered source hashes before and after extraction and again before publishing repaired indexed documents. Report changed files with an actionable rescan message instead of attaching new text to an old source identity.
+
+### Changed
+
+- Pin vector-core to v1.7.0 for strict complete-input embedding, lossless retained-source fragments, grouped retrieval and byte-bounded writes.
+- Full-document search now groups content matches by document rather than searching metadata summaries alone. Similarity compares every indexed source passage in bounded concurrent batches and ranks documents by their best passage-pair match, hydrating only final winners. Filename, title and tag summaries remain auxiliary search evidence.
+- Preserve canonical retained chunks when model changes require additional searchable fragments; chunk reads return the original retained records rather than duplicate derived fragments.
+
 ## [1.4.1] - 2026-10-01
 
 ### Fixed

@@ -47,6 +47,10 @@ def components():
     storage.scroll_points.return_value = []
     embedder = AsyncMock()
     embedder.embed_batch.side_effect = lambda texts: [[0.1, 0.2] for _ in texts]
+    embedder.split_text = MagicMock(
+        side_effect=lambda text, **kwargs: [SimpleNamespace(start=0, end=len(text), text=text)]
+    )
+    embedder.embed_all.side_effect = lambda texts, **kwargs: [[0.1, 0.2] for _ in texts]
     embedder.embed_single_cached.return_value = [0.1, 0.2]
     vocab = MagicMock()
     vocab.tokenize.return_value = ["example"]
@@ -120,7 +124,10 @@ async def test_incremental_index_migrates_indexed_missing_source(
     storage, embedder, vocab = components()
     indexer = DocumentIndexer(document_store, storage, embedder, vocab, "documents")
 
-    assert await indexer.index_all() == {"indexed": 0, "total": 1}
+    result = await indexer.index_all()
+    assert result["indexed"] == 0
+    assert result["total"] == 1
+    assert result["unavailable_sources"][0]["document_id"] == str(doc.id)
     ensure.assert_awaited_once()
     assert document_store.read(doc.id) == before
     assert events == ["locked", "resolved", "unlocked"]
@@ -130,41 +137,52 @@ async def test_incremental_index_migrates_indexed_missing_source(
 
 
 async def test_index_document_persists_input_and_uses_one_locked_generation(
-    routing, document_store, sample_text
+    routing, document_store, sample_text, monkeypatch
 ):
     events, ensure = routing
     doc = document_store.register(sample_text)
     storage, embedder, vocab = components()
     indexer = DocumentIndexer(document_store, storage, embedder, vocab, "documents")
 
-    async def upsert(collection, points):
-        assert events == ["locked", "resolved"]
-        assert collection == "documents_generation_new"
-        assert [p.payload[p.payload["embedding_text_field"]] for p in points] == [
-            doc.filename,
-            "Previously extracted text",
-        ]
+    written = []
 
-    storage.upsert_batch.side_effect = upsert
+    async def upsert(target_storage, collection, points):
+        assert events == ["locked", "resolved"]
+        assert target_storage is storage
+        assert collection == "documents_generation_new"
+        written.extend(p.payload[p.payload["embedding_text_field"]] for p in points)
+
+    monkeypatch.setattr("mcp_docs.indexing.indexer.upsert_fragment_group", upsert)
+    storage.get_client.return_value.scroll.return_value = ([], None)
     assert await indexer.index_document(doc.id, "Previously extracted text") == 2
-    assert storage.delete_by_filter.await_args.args[0] == "documents_generation_new"
+    assert written == ["Previously extracted text", doc.filename]
+    storage.delete_by_filter.assert_not_awaited()
+    assert storage.get_client.return_value.scroll.await_args.args[0] == "documents_generation_new"
     ensure.assert_awaited_once()
     assert events == ["locked", "resolved", "unlocked"]
     assert indexer.collection_name == "documents"
-    embedder.embed_batch.assert_awaited_once_with([doc.filename, "Previously extracted text"])
+    assert [text for call in embedder.embed_all.await_args_list for text in call.args[0]] == [
+        doc.filename,
+        "Previously extracted text",
+    ]
 
 
 @pytest.mark.parametrize(
     "method", ["update_document_tags_in_index", "update_document_filename_in_index"]
 )
-async def test_summary_refresh_binds_generation(method, routing, document_store, sample_text):
+async def test_summary_refresh_binds_generation(
+    method, routing, document_store, sample_text, monkeypatch
+):
     doc = document_store.register(sample_text)
     doc = document_store.update(doc.id, extraction_status=ExtractionStatus.INDEXED)
     storage, embedder, vocab = components()
     indexer = DocumentIndexer(document_store, storage, embedder, vocab, "documents")
+    upsert = AsyncMock()
+    monkeypatch.setattr("mcp_docs.indexing.indexer.upsert_fragment_group", upsert)
     await getattr(indexer, method)(doc)
     assert storage.update_payload.await_args.args[0] == "documents_generation_new"
-    collection, points = storage.upsert_batch.await_args.args
+    target_storage, collection, points = upsert.await_args.args
+    assert target_storage is storage
     assert collection == "documents_generation_new"
     assert points[0].payload["embedding_text_field"] == "content"
     assert "embedding_text" not in points[0].payload
@@ -187,11 +205,14 @@ async def test_similarity_freezes_target_for_vector_read_and_query(routing):
         [SimpleNamespace(vector={"dense": [0.1, 0.2]})],
         None,
     )
-    storage.query_dense.return_value = []
+    storage.get_client.return_value.query_points_groups.return_value = SimpleNamespace(groups=[])
     engine = DocumentSearchEngine(storage, embedder, vocab, "documents")
     assert await engine.find_similar(uuid4()) == []
     assert storage.get_client.return_value.scroll.await_args.args[0] == "documents_generation_new"
-    assert storage.query_dense.await_args.kwargs["collection"] == "documents_generation_new"
+    assert (
+        storage.get_client.return_value.query_points_groups.await_args.args[0]
+        == "documents_generation_new"
+    )
 
 
 @pytest.mark.parametrize("kind", ["document", "doc_chunk"])
@@ -356,16 +377,21 @@ async def test_real_migration_retains_unavailable_document_and_index_state(
         await raw.upsert("documents", points, wait=True)
         original, _ = await raw.scroll("documents", with_vectors=True)
         indexer = DocumentIndexer(document_store, storage, embedder, vocab, "documents")
-        assert await indexer.index_all() == {"indexed": 0, "total": 1}
+        result = await indexer.index_all()
+        assert result["indexed"] == 0
+        assert result["total"] == 1
+        assert result["unavailable_sources"][0]["document_id"] == str(doc.id)
         target = await active_embedding_collection(storage, "documents")
         assert target != "documents"
         migrated, _ = await raw.scroll(target, with_vectors=True)
         assert {p.id for p in migrated} == {0, 1, 2}
         assert document_store.read(doc.id) == before
         assert (await raw.scroll("documents", with_vectors=True))[0] == original
-        embedder.embed_all.assert_awaited_once_with(
-            ["Retained summary", "Retained full chunk"], role="document"
-        )
+        assert [text for call in embedder.embed_all.await_args_list for text in call.args[0]] == [
+            "Retained summary",
+            "Retained full chunk",
+        ]
+        assert all(call.kwargs["role"] == "document" for call in embedder.embed_all.await_args_list)
         for point in migrated:
             if point.id:
                 assert len(point.vector["dense"]) == 3

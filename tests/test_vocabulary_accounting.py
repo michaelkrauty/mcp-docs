@@ -14,11 +14,12 @@ registration call into a no-op stub that asserts nothing about correctness.
 from __future__ import annotations
 
 import sqlite3
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 import pytest
-from qdrant_client.models import FieldCondition, PointStruct
+from qdrant_client.models import FieldCondition, Filter, PointStruct
 from vector_core import GlobalVocabulary
 
 from mcp_docs.indexing.indexer import DOCS_CODEBASE_ID, DocumentIndexer
@@ -40,6 +41,47 @@ class FakeStorage:
 
     def __init__(self) -> None:
         self.points: dict[Any, PointStruct] = {}
+        self.url = "http://isolated.invalid"
+
+    async def get_client(self):
+        return self
+
+    async def update_payload(self, collection, filter_conditions, payload):
+        matches, _ = await self.scroll(
+            collection,
+            scroll_filter=Filter(must=filter_conditions),
+            limit=max(1, len(self.points)),
+        )
+        for point in matches:
+            point.payload.update(payload)
+
+    async def retrieve(self, collection, ids, **kwargs):
+        return [self.points[point_id] for point_id in ids if point_id in self.points]
+
+    async def upsert(self, collection, points, **kwargs):
+        await self.upsert_batch(collection, points)
+
+    async def delete(self, collection, points_selector, **kwargs):
+        for point_id in points_selector.points:
+            self.points.pop(point_id, None)
+
+    async def scroll(self, collection, scroll_filter=None, offset=None, limit=128, **kwargs):
+        from qdrant_client.local.payload_filters import check_filter
+
+        points = [
+            point
+            for point in self.points.values()
+            if scroll_filter is None
+            or check_filter(
+                scroll_filter,
+                point.payload or {},
+                point.id,
+                dict.fromkeys(point.vector, True) if isinstance(point.vector, dict) else {},
+            )
+        ]
+        start = offset or 0
+        end = min(start + limit, len(points))
+        return points[start:end], end if end < len(points) else None
 
     async def upsert_batch(self, collection: str, points: list[PointStruct]) -> None:
         for point in points:
@@ -65,7 +107,7 @@ class FakeStorage:
             if all((point.payload or {}).get(key) == value for key, value in wanted.items())
         ]
         if payload_fields is not None:
-            matches = [{k: p.get(k) for k in payload_fields} for p in matches]
+            matches = [{k: p[k] for k in payload_fields if k in p} for p in matches]
         return matches
 
 
@@ -74,6 +116,13 @@ class FakeEmbedder:
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+
+    @staticmethod
+    def split_text(text: str, **kwargs):
+        return [SimpleNamespace(start=0, end=len(text), text=text)]
+
+    async def embed_all(self, texts, **kwargs):
+        return await self.embed_batch(texts)
 
 
 def _make_indexer(
@@ -217,6 +266,8 @@ class TestIndexDocumentVocabulary:
         before = vocab.get_codebase_doc_count(DOCS_CODEBASE_ID)
 
         failing = MagicMock()
+        failing.split_text.side_effect = FakeEmbedder.split_text
+        failing.embed_all = AsyncMock(side_effect=RuntimeError("embedding unavailable"))
         failing.embed_batch = AsyncMock(side_effect=RuntimeError("embedding unavailable"))
         indexer.embedder = failing
 
@@ -261,6 +312,8 @@ class TestFailedVocabularyWriteIsNotCompensated:
 
         monkeypatch.setattr(vocab, "update_codebase_incremental", flaky)
         failing = MagicMock()
+        failing.split_text.side_effect = FakeEmbedder.split_text
+        failing.embed_all = AsyncMock(side_effect=RuntimeError("embedding unavailable"))
         failing.embed_batch = AsyncMock(side_effect=RuntimeError("embedding unavailable"))
         indexer.embedder = failing
 
@@ -297,6 +350,8 @@ class TestFailedVocabularyWriteIsNotCompensated:
 
         monkeypatch.setattr(vocab, "update_codebase_incremental", flaky)
         failing = MagicMock()
+        failing.split_text.side_effect = FakeEmbedder.split_text
+        failing.embed_all = AsyncMock(side_effect=RuntimeError("embedding unavailable"))
         failing.embed_batch = AsyncMock(side_effect=RuntimeError("embedding unavailable"))
         indexer.embedder = failing
 

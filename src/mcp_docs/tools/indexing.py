@@ -84,17 +84,19 @@ async def index_document(document_id: str) -> dict:
 @mcp.tool()
 async def index_all_documents(force: bool = False) -> dict:
     """
-    Index all extracted documents for search.
+    Index extracted and previously indexed documents from available source files.
 
     Uses two-pass indexing:
     1. Collect tokens from all documents for vocabulary training
     2. Generate embeddings and sparse vectors for each document
 
     Args:
-        force: If True, reindex all documents. If False, only index new/changed documents.
+        force: If True, reindex all documents. If False, index new/changed
+            documents and old source layouts, skipping matching current layouts.
 
     Returns:
-        Indexing result with counts and any errors
+        Indexing counts, errors and unavailable_sources (document IDs and paths).
+        Missing originals keep their retained searchable index unchanged.
     """
     try:
         indexer = await get_document_indexer()

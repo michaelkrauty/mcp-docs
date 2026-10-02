@@ -1,5 +1,6 @@
 """Document indexer for Qdrant with hybrid search support."""
 
+import asyncio
 import hashlib
 import logging
 from collections.abc import Iterable
@@ -7,13 +8,30 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
-from qdrant_client.models import FieldCondition, MatchValue, PayloadSchemaType, PointStruct
+from qdrant_client.models import (
+    FieldCondition,
+    Filter,
+    MatchAny,
+    MatchValue,
+    PayloadSchemaType,
+    PointIdsList,
+    PointStruct,
+    SparseVector,
+    WriteOrdering,
+)
 from vector_core import (
     EmbeddingClient,
     GlobalVocabulary,
     QdrantStorage,
     create_hybrid_point_with_key,
 )
+from vector_core.storage.embedding_fragments import (
+    fragment_marker,
+    fragment_point,
+    is_derived_fragment,
+    upsert_fragment_group,
+)
+from vector_core.utils.hashing import compute_file_hash
 
 from mcp_docs.embedding import EmbeddingCollection, embedding_operation
 from mcp_docs.extraction.extractor import extract_content
@@ -32,6 +50,7 @@ logger = logging.getLogger(__name__)
 
 # Codebase ID for GlobalVocabulary registration
 DOCS_CODEBASE_ID = "docs"
+SOURCE_LAYOUT_VERSION = 2
 
 
 class DocumentIndexer(EmbeddingCollection):
@@ -150,10 +169,12 @@ class DocumentIndexer(EmbeddingCollection):
             filter_conditions=[
                 FieldCondition(key="document_id", match=MatchValue(value=str(document_id))),
             ],
-            payload_fields=["content"],
+            payload_fields=["content", "embedding_fragment"],
             max_results=0,
         )
-        return bool(payloads), self._token_set(p.get("content") or "" for p in payloads)
+        return bool(payloads), self._token_set(
+            p.get("content") or "" for p in payloads if not is_derived_fragment(p)
+        )
 
     def _update_vocabulary(
         self,
@@ -290,20 +311,9 @@ class DocumentIndexer(EmbeddingCollection):
         # query()/list_summaries() default to a 50-row limit and would silently
         # truncate a larger backlog.
         #
-        # A force rebuild must reindex everything, including documents already in
-        # the INDEXED state. That is the production steady state: the worker sets
-        # EXTRACTED then auto-indexes to INDEXED, so in steady state no document
-        # is left EXTRACTED. iter_all() filters strictly by status, so force must
-        # widen the selection to both EXTRACTED and INDEXED; otherwise the work
-        # set is empty and the documented bulk-repair path silently no-ops.
-        # Incremental (force=False) stays EXTRACTED-only and leans on the per-doc
-        # hash filter below to skip unchanged docs without re-extracting the
-        # already-indexed corpus.
-        selection: ExtractionStatus | set[ExtractionStatus] = (
-            {ExtractionStatus.EXTRACTED, ExtractionStatus.INDEXED}
-            if force
-            else ExtractionStatus.EXTRACTED
-        )
+        # Include indexed sources so a changed source-layout policy invalidates
+        # old representations. Matching current hashes avoid re-extraction.
+        selection = {ExtractionStatus.EXTRACTED, ExtractionStatus.INDEXED}
         docs_to_index = list(self.document_store.iter_all(extraction_status=selection))
 
         if not docs_to_index:
@@ -328,6 +338,7 @@ class DocumentIndexer(EmbeddingCollection):
         units: dict[UUID, tuple[str, list[DocumentChunk]]] = {}
         tokens_by_doc: dict[UUID, set[str]] = {}
         extraction_errors: list[str] = []
+        unavailable_sources: list[dict[str, str]] = []
 
         for doc in docs_to_index:
             try:
@@ -335,10 +346,21 @@ class DocumentIndexer(EmbeddingCollection):
                 if not path.exists():
                     logger.warning(f"Document file not found: {doc.path}")
                     extraction_errors.append(f"{doc.filename}: file not found")
+                    unavailable_sources.append(
+                        {
+                            "document_id": str(doc.id),
+                            "path": doc.path,
+                            "reason": "Source unavailable; retained index left unchanged",
+                        }
+                    )
                     continue
 
                 # Re-extract content for indexing
+                if doc.extraction_status == ExtractionStatus.INDEXED:
+                    await self._verify_registered_source(doc)
                 extracted = extract_content(path, DocumentType(doc.doc_type))
+                if doc.extraction_status == ExtractionStatus.INDEXED:
+                    await self._verify_registered_source(doc)
                 summary, chunks = self._split_document(doc, extracted.text)
                 units[doc.id] = (summary, chunks)
 
@@ -361,6 +383,7 @@ class DocumentIndexer(EmbeddingCollection):
                 "indexed": 0,
                 "total": self.document_store.count(),
                 "errors": extraction_errors,
+                "unavailable_sources": unavailable_sources,
             }
 
         # Register the vocabulary before Pass 2 vectorizes anything, so every
@@ -383,6 +406,8 @@ class DocumentIndexer(EmbeddingCollection):
 
                 # Create both summary AND chunk points (like index_document does)
                 points = await self._build_points(doc, summary, chunks)
+                if doc.extraction_status == ExtractionStatus.INDEXED:
+                    await self._verify_registered_source(doc)
                 await self._replace_document_points(doc.id, points)
 
                 total_points += len(points)
@@ -405,7 +430,23 @@ class DocumentIndexer(EmbeddingCollection):
             "points": total_points,
             "total": self.document_store.count(),
             "errors": extraction_errors if extraction_errors else None,
+            "unavailable_sources": unavailable_sources,
         }
+
+    @staticmethod
+    async def _verify_registered_source(document: Document) -> None:
+        """Repair only the registered file identity, including after extraction."""
+        try:
+            current_hash = await asyncio.to_thread(compute_file_hash, Path(document.path))
+        except OSError as error:
+            raise ExtractionError(
+                "Source became unavailable during repair; rescan the document before retrying"
+            ) from error
+        if current_hash != document.content_hash:
+            raise ExtractionError(
+                "Source hash differs from registration; "
+                "rescan the document before repairing its index"
+            )
 
     async def _register_batch_vocabulary(
         self,
@@ -518,11 +559,6 @@ class DocumentIndexer(EmbeddingCollection):
         """
         chunks = chunk_document(document.id, content, document.page_count)
 
-        # Drop empty or whitespace-only chunks so an empty extraction is not
-        # embedded as an empty string or stored as a meaningless chunk point;
-        # the summary point still keeps the document searchable.
-        chunks = [chunk for chunk in chunks if chunk.content.strip()]
-
         return self._generate_doc_summary(document), chunks
 
     async def _build_points(
@@ -534,36 +570,50 @@ class DocumentIndexer(EmbeddingCollection):
         """Embed a document's summary and chunks and turn them into points."""
         points: list[PointStruct] = []
 
-        # Prepare texts for batch embedding, summary first
-        texts = [summary, *(chunk.content for chunk in chunks)]
-
-        # Batch embed
-        embeddings = await self.embedder.embed_batch(texts)
-
-        # Create summary point
-        points.append(
+        canonical = [
             self._create_point(
                 point_type="document",
                 document=document,
                 content=summary,
-                embedding=embeddings[0],
+                embedding=[],
+                source_layout=SOURCE_LAYOUT_VERSION,
             )
-        )
+        ]
 
         # Create chunk points
-        for i, chunk in enumerate(chunks):
-            points.append(
+        for chunk in chunks:
+            canonical.append(
                 self._create_point(
                     point_type="doc_chunk",
                     document=document,
                     content=chunk.content,
-                    embedding=embeddings[i + 1],
+                    embedding=[],
                     chunk_index=chunk.chunk_index,
                     section_title=chunk.section_title,
+                    char_start=chunk.char_start,
+                    char_end=chunk.char_end,
+                    source_layout=SOURCE_LAYOUT_VERSION,
                 )
             )
-
+        for point in canonical:
+            points.extend(await self._fragment_point(point))
         return points
+
+    async def _fragment_point(self, point: PointStruct) -> list[PointStruct]:
+        """Embed every source span without multiplying the canonical raw payload."""
+        assert self.embedder is not None
+        assert self.global_vocab is not None
+        assert isinstance(point.vector, dict)
+        assert point.payload is not None
+        sparse = point.vector["sparse"]
+        assert isinstance(sparse, SparseVector)
+        return await fragment_point(
+            self.embedder,
+            point_id=str(point.id) if isinstance(point.id, UUID) else point.id,
+            payload=point.payload,
+            sparse=sparse,
+            vectorize=self.global_vocab.vectorize_document,
+        )
 
     def _create_point(
         self,
@@ -573,6 +623,9 @@ class DocumentIndexer(EmbeddingCollection):
         embedding: list[float],
         chunk_index: int | None = None,
         section_title: str | None = None,
+        char_start: int | None = None,
+        char_end: int | None = None,
+        source_layout: int | None = None,
     ) -> PointStruct:
         """Create a Qdrant point with dense + sparse vectors."""
         # Generate deterministic key for point ID
@@ -585,7 +638,7 @@ class DocumentIndexer(EmbeddingCollection):
         sparse = self.global_vocab.vectorize_document(content)
 
         # Build payload
-        payload = {
+        payload: dict = {
             "type": point_type,
             "document_id": str(document.id),
             "content": content,
@@ -604,11 +657,17 @@ class DocumentIndexer(EmbeddingCollection):
             payload["chunk_index"] = chunk_index
         if section_title:
             payload["section_title"] = section_title
+        if char_start is not None:
+            payload["char_start"] = char_start
+        if char_end is not None:
+            payload["char_end"] = char_end
+        if source_layout is not None:
+            payload["source_layout"] = source_layout
 
         return create_hybrid_point_with_key(key, embedding, sparse, payload)
 
     def _generate_doc_summary(self, document: Document) -> str:
-        """Generate summary text for a document."""
+        """Generate auxiliary metadata evidence, never a replacement for body text."""
         parts = [document.filename]
         if document.title and document.title != document.filename:
             parts.append(document.title)
@@ -620,15 +679,18 @@ class DocumentIndexer(EmbeddingCollection):
         """
         Generate truncated hash for incremental indexing cache key.
 
-        This combines document content_hash with mutable metadata (title, tags)
-        to detect when a document needs reindexing. The 16-char truncation is
+        This combines document identity, source layout, content_hash and mutable
+        metadata (title, tags) to detect when a document needs reindexing. The 16-char truncation is
         acceptable here because:
         1. This is only for cache invalidation, not document identity
         2. Full content_hash is preserved in the document record
         3. 64 bits provides sufficient collision resistance for ~10K documents
            (birthday paradox: sqrt(2^64) = 4B collisions before ~50% probability)
         """
-        content = f"{document.content_hash}:{document.title or ''}:{','.join(document.tags)}"
+        content = (
+            f"{SOURCE_LAYOUT_VERSION}:{document.id}:{document.content_hash}:"
+            f"{document.title or ''}:{','.join(document.tags)}"
+        )
         return hashlib.sha256(content.encode()).hexdigest()[:16]
 
     async def _get_indexed_hashes(self) -> set[str]:
@@ -638,9 +700,13 @@ class DocumentIndexer(EmbeddingCollection):
                 self.collection_name,
                 filter_conditions=[
                     FieldCondition(key="type", match=MatchValue(value="document")),
+                    FieldCondition(
+                        key="source_layout", match=MatchValue(value=SOURCE_LAYOUT_VERSION)
+                    ),
                 ],
                 payload_fields=["doc_hash"],
                 limit=10000,
+                max_results=0,
             )
             # scroll_points returns list of payload dicts, not ScoredPoint objects
             return {p.get("doc_hash", "") for p in results if p}
@@ -686,28 +752,108 @@ class DocumentIndexer(EmbeddingCollection):
             return not still_indexed
         return True
 
+    async def _refresh_summary(self, document: Document) -> None:
+        """Refresh auxiliary evidence without certifying an older body layout."""
+        assert self.storage is not None
+        previous = await self.storage.scroll_points(
+            self.collection_name,
+            filter_conditions=[
+                FieldCondition(key="type", match=MatchValue(value="document")),
+                FieldCondition(key="document_id", match=MatchValue(value=str(document.id))),
+            ],
+            payload_fields=["source_layout", "embedding_fragment"],
+            max_results=0,
+        )
+        layout = next(
+            (p.get("source_layout") for p in previous if not is_derived_fragment(p)), None
+        )
+        point = self._create_point(
+            point_type="document",
+            document=document,
+            content=self._generate_doc_summary(document),
+            embedding=[],
+            source_layout=layout,
+        )
+        await upsert_fragment_group(
+            self.storage, self.collection_name, await self._fragment_point(point)
+        )
+
     async def _replace_document_points(
         self,
         document_id: UUID,
         points: list[PointStruct],
     ) -> None:
-        """Replace a document's points once the replacements are built.
-
-        Every successfully built document index contains a summary point, so an
-        empty result means construction failed and the old index is left alone.
-
-        A failed delete is logged and the upsert still runs. A remote delete has
-        an ambiguous outcome: Qdrant may have applied it and only lost the
-        response, in which case skipping the upsert would leave the document with
-        no points at all. Writing the replacements keeps it searchable either
-        way, at the cost of possibly stranding surplus chunk points from a
-        shrunken document, which is the lesser failure.
-        """
+        """Write validated, byte-bounded groups before pruning obsolete document IDs."""
         if not points:
             raise RuntimeError(f"Point construction produced no points for document {document_id}")
+        assert self.storage is not None
+        groups: dict[int | str, list[PointStruct]] = {}
+        keep_ids = {point.id for point in points}
+        if len(keep_ids) != len(points) or 0 in keep_ids:
+            raise ValueError("Document replacement contains duplicate or reserved point IDs")
+        for point in points:
+            payload = point.payload or {}
+            if payload.get("document_id") != str(document_id) or payload.get("type") not in {
+                "document",
+                "doc_chunk",
+            }:
+                raise ValueError("Document replacement contains a foreign point")
+            marker = fragment_marker(payload)
+            parent_id = marker["parent_id"] if marker else point.id
+            if isinstance(parent_id, UUID):
+                parent_id = str(parent_id)
+            groups.setdefault(parent_id, []).append(point)
+        # Invalidate an existing completion marker before any partial update.
+        # The final summary publishes it only after body writes and stale-ID cleanup.
+        await self.storage.update_payload(
+            self.collection_name,
+            filter_conditions=[
+                FieldCondition(key="document_id", match=MatchValue(value=str(document_id))),
+                FieldCondition(key="type", match=MatchValue(value="document")),
+            ],
+            payload={"source_layout": None},
+        )
+        ordered = sorted(
+            groups.values(), key=lambda group: (group[0].payload or {}).get("type") == "document"
+        )
+        summaries = []
+        for group in ordered:
+            group.sort(
+                key=lambda point: (fragment_marker(point.payload or {}) or {}).get("index", 0)
+            )
+            if (group[0].payload or {}).get("type") == "document":
+                summaries.append(group)
+            else:
+                await upsert_fragment_group(self.storage, self.collection_name, group)
 
-        await self._delete_document_points(document_id)
-        await self.storage.upsert_batch(self.collection_name, points)
+        client = await self.storage.get_client()
+        offset = None
+        while True:
+            existing, offset = await client.scroll(
+                self.collection_name,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(key="document_id", match=MatchValue(value=str(document_id))),
+                        FieldCondition(key="type", match=MatchAny(any=["document", "doc_chunk"])),
+                    ]
+                ),
+                offset=offset,
+                limit=128,
+                with_payload=False,
+                with_vectors=False,
+            )
+            stale = [point.id for point in existing if point.id not in keep_ids]
+            if stale:
+                await client.delete(
+                    self.collection_name,
+                    points_selector=PointIdsList(points=stale),
+                    wait=True,
+                    ordering=WriteOrdering.STRONG,
+                )
+            if offset is None:
+                break
+        for group in summaries:
+            await upsert_fragment_group(self.storage, self.collection_name, group)
 
     @embedding_operation(write=True)
     async def update_document_path_in_index(self, document_id: UUID, new_path: str) -> None:
@@ -775,15 +921,7 @@ class DocumentIndexer(EmbeddingCollection):
             return
 
         try:
-            summary = self._generate_doc_summary(document)
-            embedding = (await self.embedder.embed_batch([summary]))[0]
-            point = self._create_point(
-                point_type="document",
-                document=document,
-                content=summary,
-                embedding=embedding,
-            )
-            await self.storage.upsert_batch(self.collection_name, [point])
+            await self._refresh_summary(document)
             logger.debug(f"Refreshed summary point for document {document_id}")
         except Exception as e:
             logger.warning(f"Failed to refresh summary point for document {document_id}: {e}")
@@ -831,15 +969,7 @@ class DocumentIndexer(EmbeddingCollection):
             return
 
         try:
-            summary = self._generate_doc_summary(document)
-            embedding = (await self.embedder.embed_batch([summary]))[0]
-            point = self._create_point(
-                point_type="document",
-                document=document,
-                content=summary,
-                embedding=embedding,
-            )
-            await self.storage.upsert_batch(self.collection_name, [point])
+            await self._refresh_summary(document)
             logger.debug(f"Refreshed summary point for document {document_id}")
         except Exception as e:
             logger.warning(f"Failed to refresh summary point for document {document_id}: {e}")
