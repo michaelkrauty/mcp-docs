@@ -94,6 +94,49 @@ class TestMarkdownExtraction:
         assert content.word_count == 7
 
 
+@pytest.mark.parametrize("extension", [".txt", ".md"])
+@pytest.mark.parametrize(
+    "encoding, tail",
+    [
+        ("utf-8", "Late Unicode: café, 中, 🙂 and nonbreaking\u00a0space"),
+        ("cp1252", "Late punctuation: —, “quotes” and €"),
+    ],
+)
+def test_text_decodes_non_ascii_beyond_the_sniff_prefix(
+    temp_dir: Path, extension: str, encoding: str, tail: str
+) -> None:
+    text = "# Example title\r\n\r\n" + "ASCII prefix line\r\n" * 512 + "\r\n\r\n" + tail + "  \r\n"
+    raw = text.encode(encoding)
+    assert raw[:4096].isascii()
+    path = temp_dir / ("example" + extension)
+    path.write_bytes(raw)
+
+    content = ContentExtractor().extract(path)
+
+    assert content.text == text
+    assert content.title == ("Example title" if extension == ".md" else None)
+    assert content.word_count == len(text.split())
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("extension", [".txt", ".md"])
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16"])
+def test_text_honors_bom_without_changing_content(
+    temp_dir: Path, extension: str, encoding: str
+) -> None:
+    text = "# Example title\r\n\r\n\r\nUnicode: café 中 🙂  \r\n"
+    raw = text.encode(encoding)
+    path = temp_dir / ("example" + extension)
+    path.write_bytes(raw)
+
+    content = ContentExtractor().extract(path)
+
+    assert content.text == text
+    assert content.title == ("Example title" if extension == ".md" else None)
+    assert content.word_count == len(text.split())
+    assert path.read_bytes() == raw
+
+
 class TestPptxExtraction:
     """Tests for PPTX extraction."""
 

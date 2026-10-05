@@ -58,9 +58,7 @@ def _read_text_with_encoding_fallback(path: Path) -> str:
         nul_odd = sum(1 for i in range(1, len(data), 2) if data[i] == 0)
         nul_even = sum(1 for i in range(0, len(data), 2) if data[i] == 0)
         candidates = (
-            ("utf-16-le", "utf-16-be")
-            if nul_odd >= nul_even
-            else ("utf-16-be", "utf-16-le")
+            ("utf-16-le", "utf-16-be") if nul_odd >= nul_even else ("utf-16-be", "utf-16-le")
         )
         for encoding in candidates:
             try:
@@ -144,7 +142,7 @@ def extract_text(path: Path) -> ExtractedContent:
         ExtractionError: If extraction fails
     """
     try:
-        text = extract_text_markitdown(path)
+        text = _read_text_with_encoding_fallback(path)
         word_count = len(text.split()) if text else 0
         return ExtractedContent(
             text=text,
@@ -173,7 +171,7 @@ def extract_markdown(path: Path) -> ExtractedContent:
         ExtractionError: If extraction fails
     """
     try:
-        text = extract_text_markitdown(path)
+        text = _read_text_with_encoding_fallback(path)
 
         # Try to extract title from first H1
         title = None

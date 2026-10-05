@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.5.3] - 2026-10-04
+
+### Fixed
+
+- Decode plain text and Markdown with the existing whole-file encoding fallback instead of relying on a prefix-only charset guess. Files with long ASCII prefixes followed by UTF-8 or Windows-1252 text now extract correctly, with BOM handling and source whitespace preserved.
+
 ## [1.5.2] - 2026-10-04
 
 ### Changed
