@@ -394,7 +394,9 @@ async def test_same_content_current_document_cannot_hide_legacy_document(
     result = await indexer.index_all()
     assert result["indexed"] == 1
     assert extraction.call_count == 1
-    store.update.assert_called_once_with(legacy.id, extraction_status=ExtractionStatus.INDEXED)
+    store.update.assert_called_once_with(
+        legacy.id, title=legacy.title, word_count=4, extraction_status=ExtractionStatus.INDEXED
+    )
 
 
 @pytest.mark.usefixtures("embedding_generation")

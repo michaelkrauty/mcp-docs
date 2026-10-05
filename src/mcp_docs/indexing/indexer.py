@@ -40,6 +40,7 @@ from mcp_docs.models import (
     Document,
     DocumentChunk,
     DocumentType,
+    ExtractedContent,
     ExtractionError,
     ExtractionStatus,
 )
@@ -337,6 +338,7 @@ class DocumentIndexer(EmbeddingCollection):
         # We re-extract content here since it's not stored in the database
         units: dict[UUID, tuple[str, list[DocumentChunk]]] = {}
         tokens_by_doc: dict[UUID, set[str]] = {}
+        text_metadata: dict[UUID, ExtractedContent] = {}
         extraction_errors: list[str] = []
         unavailable_sources: list[dict[str, str]] = []
 
@@ -361,6 +363,10 @@ class DocumentIndexer(EmbeddingCollection):
                 extracted = extract_content(path, DocumentType(doc.doc_type))
                 if doc.extraction_status == ExtractionStatus.INDEXED:
                     await self._verify_registered_source(doc)
+                if doc.doc_type in {DocumentType.TXT, DocumentType.MD}:
+                    text_metadata[doc.id] = extracted
+                    if doc.doc_type == DocumentType.MD and not doc.title:
+                        doc.title = extracted.title
                 summary, chunks = self._split_document(doc, extracted.text)
                 units[doc.id] = (summary, chunks)
 
@@ -415,7 +421,15 @@ class DocumentIndexer(EmbeddingCollection):
                 logger.debug(f"Indexed {doc.filename}: {len(points)} points")
 
                 # Update status to indexed
-                self.document_store.update(doc.id, extraction_status=ExtractionStatus.INDEXED)
+                if doc.id in text_metadata:
+                    self.document_store.update(
+                        doc.id,
+                        title=doc.title,
+                        word_count=text_metadata[doc.id].word_count,
+                        extraction_status=ExtractionStatus.INDEXED,
+                    )
+                else:
+                    self.document_store.update(doc.id, extraction_status=ExtractionStatus.INDEXED)
 
             except Exception as e:
                 logger.error(f"Failed to index document {doc.id}: {e}")
@@ -691,6 +705,8 @@ class DocumentIndexer(EmbeddingCollection):
             f"{SOURCE_LAYOUT_VERSION}:{document.id}:{document.content_hash}:"
             f"{document.title or ''}:{','.join(document.tags)}"
         )
+        if document.doc_type in {DocumentType.TXT, DocumentType.MD}:
+            content += ":whole-file-text-v1"
         return hashlib.sha256(content.encode()).hexdigest()[:16]
 
     async def _get_indexed_hashes(self) -> set[str]:

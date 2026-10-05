@@ -4,6 +4,8 @@ import csv
 import io
 from pathlib import Path
 
+from charset_normalizer import from_bytes
+from charset_normalizer.utils import is_multi_byte_encoding
 from striprtf.striprtf import rtf_to_text
 
 from mcp_docs.extraction.markitdown_extractor import extract_text_markitdown
@@ -58,9 +60,7 @@ def _read_text_with_encoding_fallback(path: Path) -> str:
         nul_odd = sum(1 for i in range(1, len(data), 2) if data[i] == 0)
         nul_even = sum(1 for i in range(0, len(data), 2) if data[i] == 0)
         candidates = (
-            ("utf-16-le", "utf-16-be")
-            if nul_odd >= nul_even
-            else ("utf-16-be", "utf-16-le")
+            ("utf-16-le", "utf-16-be") if nul_odd >= nul_even else ("utf-16-be", "utf-16-le")
         )
         for encoding in candidates:
             try:
@@ -130,12 +130,70 @@ def _csv_to_markdown_table(raw: str) -> str:
     return "\n".join(lines)
 
 
-def extract_text(path: Path) -> ExtractedContent:
+def _read_plain_text(path: Path) -> str:
+    """Decode complete known text inputs strictly, retaining legacy detection."""
+    data = path.read_bytes()
+    for bom, encoding in (
+        (b"\xff\xfe\x00\x00", "utf-32"),
+        (b"\x00\x00\xfe\xff", "utf-32"),
+        (b"\xff\xfe", "utf-16"),
+        (b"\xfe\xff", "utf-16"),
+        (b"\xef\xbb\xbf", "utf-8-sig"),
+    ):
+        if data.startswith(bom):
+            return data.decode(encoding)
+    # ASCII-dominant UTF-16/32 has NUL padding in most code units. Require
+    # that pattern in every padding lane; an isolated UTF-8 NUL is not enough.
+    # Try UTF-32 first so its extra padding is not retained as UTF-16 NULs.
+    if b"\x00" in data:
+        for encoding, width, low_lane in (
+            ("utf-32-le", 4, 0),
+            ("utf-32-be", 4, 3),
+            ("utf-16-le", 2, 0),
+            ("utf-16-be", 2, 1),
+        ):
+            units, remainder = divmod(len(data), width)
+            if remainder or data[low_lane::width].count(0) * 2 >= units:
+                continue
+            if all(
+                data[lane::width].count(0) * 2 > units for lane in range(width) if lane != low_lane
+            ):
+                try:
+                    return data.decode(encoding)
+                except UnicodeDecodeError:
+                    continue
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    matches = from_bytes(data)
+    detected = matches.best()
+    if detected is None:
+        raise ExtractionError("Unable to determine text encoding")
+    encoding = detected.encoding
+    # Prefer conventional Windows punctuation only on equally strong or better
+    # single-byte matches; retain stronger and multibyte legacy detections.
+    try:
+        western = matches["cp1252"]
+    except KeyError:
+        western = None
+    if (
+        western is not None
+        and not is_multi_byte_encoding(encoding)
+        and western.chaos <= detected.chaos
+        and western.coherence >= detected.coherence
+    ):
+        encoding = "cp1252"
+    return data.decode(encoding)
+
+
+def extract_text(path: Path, *, sniff_format: bool = False) -> ExtractedContent:
     """
     Extract content from a plain text file.
 
     Args:
         path: Path to the text file
+        sniff_format: Preserve content-based conversion for unknown file types.
 
     Returns:
         ExtractedContent with text and word count
@@ -144,7 +202,7 @@ def extract_text(path: Path) -> ExtractedContent:
         ExtractionError: If extraction fails
     """
     try:
-        text = extract_text_markitdown(path)
+        text = extract_text_markitdown(path) if sniff_format else _read_plain_text(path)
         word_count = len(text.split()) if text else 0
         return ExtractedContent(
             text=text,
@@ -173,7 +231,7 @@ def extract_markdown(path: Path) -> ExtractedContent:
         ExtractionError: If extraction fails
     """
     try:
-        text = extract_text_markitdown(path)
+        text = _read_plain_text(path)
 
         # Try to extract title from first H1
         title = None
