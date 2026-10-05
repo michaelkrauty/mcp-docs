@@ -4,7 +4,9 @@
 
 ### Fixed
 
-- Decode plain text and Markdown with the existing whole-file encoding fallback instead of relying on a prefix-only charset guess. Files with long ASCII prefixes followed by UTF-8 or Windows-1252 text now extract correctly, with BOM handling and source whitespace preserved.
+- Decode known plain text and Markdown from complete inputs with strict UTF/BOM handling and full-file legacy charset detection instead of relying on a prefix-only guess. Files with long ASCII prefixes followed by UTF-8 or Windows-1252 text now extract correctly, with source whitespace preserved. Unknown file types retain content-based conversion.
+- Incremental indexing refreshes previously indexed text and Markdown once for the new extraction policy. Cache keys for PDF and other formats remain compatible.
+- Successful text repairs refresh word counts and fill missing Markdown titles while preserving nonempty titles and registered source identities.
 
 ## [1.5.2] - 2026-10-04
 

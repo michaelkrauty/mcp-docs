@@ -93,12 +93,11 @@ class ContentExtractor:
             return extract_ipynb(path)
         elif doc_type == DocumentType.ODT:
             raise ExtractionError(
-                f"ODT format not directly supported: {path.name}. "
-                "Please convert to DOCX format."
+                f"ODT format not directly supported: {path.name}. Please convert to DOCX format."
             )
         elif doc_type == DocumentType.UNKNOWN:
-            # Try as plain text
-            return extract_text(path)
+            # Preserve content sniffing for documents without a known extension.
+            return extract_text(path, sniff_format=True)
         else:
             raise ExtractionError(f"Unsupported document type: {doc_type.value}")
 

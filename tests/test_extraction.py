@@ -137,6 +137,83 @@ def test_text_honors_bom_without_changing_content(
     assert path.read_bytes() == raw
 
 
+@pytest.mark.parametrize("extension", [".txt", ".md"])
+@pytest.mark.parametrize(
+    "encoding, text",
+    [
+        (
+            "shift_jis",
+            "日本語の文章を正しく読み取るための確認です。図書館では多くの本を読むことができます。今日は晴れたので、公園を歩きながら新しい計画について考えました。",
+        ),
+        (
+            "gbk",
+            "这是用于确认中文文本能够正确读取的测试。图书馆里有很多书籍，读者可以学习新的知识。今天天气晴朗，我们在公园散步并讨论下一次旅行的计划。",
+        ),
+        (
+            "koi8_r",
+            "Это проверка правильного чтения русского текста. "
+            "В библиотеке можно найти много интересных книг и узнать новое. "
+            "Сегодня хорошая погода, поэтому мы гуляли в парке "
+            "и обсуждали планы следующего путешествия.",
+        ),
+    ],
+)
+def test_text_retains_non_western_legacy_detection(
+    temp_dir: Path, extension: str, encoding: str, text: str
+) -> None:
+    text += "  \r\n"
+    path = temp_dir / ("example" + extension)
+    raw = text.encode(encoding)
+    path.write_bytes(raw)
+    content = ContentExtractor().extract(path)
+    assert content.text == text
+    assert content.word_count == len(text.split())
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("extension", [".txt", ".md"])
+def test_text_rejects_malformed_bom_instead_of_replacing_bytes(
+    temp_dir: Path, extension: str
+) -> None:
+    path = temp_dir / ("example" + extension)
+    path.write_bytes(b"\xff\xfe\x61")
+    with pytest.raises(ExtractionError) as error:
+        ContentExtractor().extract(path)
+    assert isinstance(error.value.__cause__, UnicodeDecodeError)
+    assert path.read_bytes() == b"\xff\xfe\x61"
+
+
+@pytest.mark.parametrize("extension", ["", ".bin"])
+@pytest.mark.parametrize("media", ["html", "pdf", "docx"])
+def test_unknown_type_keeps_content_conversion(
+    temp_dir: Path, sample_docx: Path, extension: str, media: str
+) -> None:
+    path = temp_dir / ("example" + extension)
+    if media == "html":
+        path.write_bytes(b"<html><body><h1>Example heading</h1><p>Example body</p></body></html>")
+    elif media == "docx":
+        path.write_bytes(sample_docx.read_bytes())
+    else:
+        from pypdf import PdfWriter
+
+        writer = PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        with path.open("wb") as stream:
+            writer.write(stream)
+    raw = path.read_bytes()
+    content = ContentExtractor().extract(path)
+    if media == "html":
+        assert "Example heading" in content.text
+        assert "Example body" in content.text
+        assert "<h1>" not in content.text
+    elif media == "docx":
+        assert "Test Document" in content.text
+        assert "test paragraph" in content.text
+    else:
+        assert content.text == ""
+    assert path.read_bytes() == raw
+
+
 class TestPptxExtraction:
     """Tests for PPTX extraction."""
 
