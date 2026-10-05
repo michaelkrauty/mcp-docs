@@ -138,6 +138,59 @@ def test_text_honors_bom_without_changing_content(
 
 
 @pytest.mark.parametrize("extension", [".txt", ".md"])
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "hello",
+        "# Example title\r\n\r\n" + "The library has many books to read.  \r\n" * 128,
+        "# Example title\r\n\r\n"
+        + "The library has many books to read.  \r\n" * 128
+        + "Late Unicode: café 中 🙂  \r\n",
+    ],
+)
+def test_text_detects_bomless_unicode(
+    temp_dir: Path, extension: str, encoding: str, text: str
+) -> None:
+    raw = text.encode(encoding)
+    path = temp_dir / ("example" + extension)
+    path.write_bytes(raw)
+
+    content = ContentExtractor().extract(path)
+
+    assert content.text == text
+    expected_title = "Example title" if extension == ".md" and text.startswith("# ") else None
+    assert content.title == expected_title
+    assert content.word_count == len(text.split())
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("extension", [".txt", ".md"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "hello\x00world\n",
+        "# Example title\r\n\r\nAn embedded\x00NUL followed by ASCII text  \r\n",
+        "# Example title\r\n\r\nAn embedded\x00NUL followed by Unicode: café 中 🙂  \r\n",
+    ],
+)
+def test_text_preserves_genuine_utf8_embedded_nul(
+    temp_dir: Path, extension: str, text: str
+) -> None:
+    raw = text.encode("utf-8")
+    path = temp_dir / ("example" + extension)
+    path.write_bytes(raw)
+
+    content = ContentExtractor().extract(path)
+
+    assert content.text == text
+    expected_title = "Example title" if extension == ".md" and text.startswith("# ") else None
+    assert content.title == expected_title
+    assert content.word_count == len(text.split())
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("extension", [".txt", ".md"])
 @pytest.mark.parametrize(
     "encoding, text",
     [

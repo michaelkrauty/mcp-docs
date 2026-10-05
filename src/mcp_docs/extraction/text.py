@@ -142,6 +142,26 @@ def _read_plain_text(path: Path) -> str:
     ):
         if data.startswith(bom):
             return data.decode(encoding)
+    # ASCII-dominant UTF-16/32 has NUL padding in most code units. Require
+    # that pattern in every padding lane; an isolated UTF-8 NUL is not enough.
+    # Try UTF-32 first so its extra padding is not retained as UTF-16 NULs.
+    if b"\x00" in data:
+        for encoding, width, low_lane in (
+            ("utf-32-le", 4, 0),
+            ("utf-32-be", 4, 3),
+            ("utf-16-le", 2, 0),
+            ("utf-16-be", 2, 1),
+        ):
+            units, remainder = divmod(len(data), width)
+            if remainder or data[low_lane::width].count(0) * 2 >= units:
+                continue
+            if all(
+                data[lane::width].count(0) * 2 > units for lane in range(width) if lane != low_lane
+            ):
+                try:
+                    return data.decode(encoding)
+                except UnicodeDecodeError:
+                    continue
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
