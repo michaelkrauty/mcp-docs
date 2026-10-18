@@ -5,6 +5,7 @@ Tools:
 - index_all_documents: Index all extracted documents
 """
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -64,7 +65,7 @@ async def index_document(document_id: str) -> dict:
                 f"Document file not found: {document.path}",
             )
 
-        extracted = extract_content(path, DocumentType(document.doc_type))
+        extracted = await asyncio.to_thread(extract_content, path, DocumentType(document.doc_type))
         points = await indexer.index_document(uuid, extracted.text)
 
         # Update status

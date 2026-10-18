@@ -207,6 +207,7 @@ class DocumentProcessor:
 
         # Worker management
         self._workers: list[asyncio.Task] = []
+        self._startup_indexing: asyncio.Task[None] | None = None
         self._running = False
         self._shutdown_event = asyncio.Event()
 
@@ -234,10 +235,12 @@ class DocumentProcessor:
         # Re-enqueue orphaned documents from previous runs
         await self._reenqueue_orphaned_documents()
 
-        # Index any extracted-but-not-indexed documents
-        # Awaited (not background) to ensure indexing completes on startup
+        # Index any extracted-but-not-indexed documents in the background.
+        # index_all can run for minutes (OCR), and start() runs while the
+        # processor singleton is created, so awaiting it here would hold every
+        # processor-backed tool call until the whole pass finished.
         if self.indexer is not None:
-            await self._index_extracted_documents()
+            self._startup_indexing = asyncio.create_task(self._index_extracted_documents())
 
     async def _reenqueue_orphaned_documents(self) -> None:
         """
@@ -392,6 +395,19 @@ class DocumentProcessor:
         queue_size = self.queue.qsize()
         if queue_size > 0:
             logger.warning(f"{queue_size} documents still queued, will be abandoned")
+
+        # An unfinished startup pass is resumed by the next start(), which
+        # re-selects whatever is still unindexed.
+        startup_indexing, self._startup_indexing = self._startup_indexing, None
+        if startup_indexing is not None:
+            startup_indexing.cancel()
+            try:
+                await startup_indexing
+            except asyncio.CancelledError:
+                # Swallow only the cancellation requested above.
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
 
         # Cancel workers after timeout
         try:

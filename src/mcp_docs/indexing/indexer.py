@@ -360,7 +360,11 @@ class DocumentIndexer(EmbeddingCollection):
                 # Re-extract content for indexing
                 if doc.extraction_status == ExtractionStatus.INDEXED:
                     await self._verify_registered_source(doc)
-                extracted = extract_content(path, DocumentType(doc.doc_type))
+                # Extraction is synchronous and can run for minutes (OCR), so
+                # keep it off the event loop that serves MCP requests.
+                extracted = await asyncio.to_thread(
+                    extract_content, path, DocumentType(doc.doc_type)
+                )
                 if doc.extraction_status == ExtractionStatus.INDEXED:
                     await self._verify_registered_source(doc)
                 if doc.doc_type in {DocumentType.TXT, DocumentType.MD}:
