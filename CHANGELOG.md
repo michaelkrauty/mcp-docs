@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.4] - 2026-10-18
+
+### Fixed
+
+- Document extraction no longer runs on the MCP event loop. `index_all_documents` and `index_document` called the synchronous extractor inline, so extracting a large document (in particular OCR of a scanned PDF, which can take minutes) stalled the whole server until it finished, including the indexing pass the processor runs when it starts: no request was answered and no message from the client was read. Both now extract on a worker thread, matching the processing queue (#83), and concurrent `index_document` calls extract at most `DOCS_MAX_WORKERS` documents at a time. Operations that bind the document collection (searches and index writes) still wait for an indexing pass, which holds the collection lock while it extracts.
+- Because other requests can now run while `index_document` extracts, the indexer rechecks under the collection write lock that the document's registration and source file still match the extracted text before publishing it. A document rescanned or edited in the meantime returns a conflict and keeps its existing index, and one deleted in the meantime returns a conflict instead of a false success.
+- The synchronous OCR entry point no longer replaces an OCR `RuntimeError` raised inside a running event loop with an unrelated "asyncio.run() cannot be called from a running event loop" error, and its docstring no longer claims it avoids blocking the caller.
+
 ## [1.5.3] - 2026-10-04
 
 ### Fixed

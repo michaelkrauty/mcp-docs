@@ -98,6 +98,10 @@ class ExtractionError(DocumentError):
     pass
 
 
+class SourceChangedError(ExtractionError):
+    """A document's source or registration changed while it was being indexed."""
+
+
 class Document(BaseModel):
     """
     Registered document with metadata.

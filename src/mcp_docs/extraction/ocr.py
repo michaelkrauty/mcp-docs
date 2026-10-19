@@ -307,20 +307,22 @@ def extract_scanned_pdf_sync(path: Path) -> ExtractedContent:
     """
     Synchronous entry point for scanned PDF extraction.
 
-    Handles the async/sync boundary cleanly — works whether called
-    from a sync context or from within an async event loop.
+    Blocks the calling thread until OCR finishes. Async callers must run
+    extraction on a worker thread (as the indexer and processing queue do)
+    rather than on their event loop.
     """
     try:
         asyncio.get_running_loop()
-        # Already in an async context — run OCR in a separate thread
-        # with its own event loop to avoid blocking the caller's loop.
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, _extract_with_cache(path)).result()
     except RuntimeError:
-        # No running event loop — safe to create one
+        # No loop in this thread, the normal case on an extraction worker.
         return asyncio.run(_extract_with_cache(path))
+
+    # asyncio.run() cannot nest inside a running loop, so OCR gets its own
+    # thread. The caller's loop still waits on .result() until OCR finishes.
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, _extract_with_cache(path)).result()
 
 
 def _merge_pages(page_texts: list[str]) -> str:
