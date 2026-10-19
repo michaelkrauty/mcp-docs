@@ -43,6 +43,7 @@ from mcp_docs.models import (
     ExtractedContent,
     ExtractionError,
     ExtractionStatus,
+    SourceChangedError,
 )
 from mcp_docs.settings import settings
 from mcp_docs.storage.database import DocumentStore
@@ -239,6 +240,7 @@ class DocumentIndexer(EmbeddingCollection):
         self,
         document_id: UUID,
         content: str,
+        expected_content_hash: str | None = None,
     ) -> int:
         """
         Index a single document.
@@ -250,9 +252,16 @@ class DocumentIndexer(EmbeddingCollection):
         Args:
             document_id: Document UUID
             content: Extracted document content
+            expected_content_hash: Registered hash of the source ``content`` was
+                extracted from. When given, the registration and the file on
+                disk must still match it, checked under the write lock.
 
         Returns:
             Number of points indexed
+
+        Raises:
+            SourceChangedError: If the document or its source changed since
+                ``content`` was extracted
         """
         await self._ensure_components()
         await self.ensure_collection()
@@ -262,6 +271,13 @@ class DocumentIndexer(EmbeddingCollection):
         if document is None:
             logger.error(f"Document not found: {document_id}")
             return 0
+        if expected_content_hash is not None:
+            if document.content_hash != expected_content_hash:
+                raise SourceChangedError(
+                    "Document registration changed during extraction; "
+                    "index it again to use the current source"
+                )
+            await self._verify_registered_source(document)
 
         summary, chunks = self._split_document(document, content)
         added = self._token_set([summary, *(chunk.content for chunk in chunks)])
@@ -457,11 +473,11 @@ class DocumentIndexer(EmbeddingCollection):
         try:
             current_hash = await asyncio.to_thread(compute_file_hash, Path(document.path))
         except OSError as error:
-            raise ExtractionError(
+            raise SourceChangedError(
                 "Source became unavailable during repair; rescan the document before retrying"
             ) from error
         if current_hash != document.content_hash:
-            raise ExtractionError(
+            raise SourceChangedError(
                 "Source hash differs from registration; "
                 "rescan the document before repairing its index"
             )

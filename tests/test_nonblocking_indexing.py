@@ -9,13 +9,14 @@ the loop thread instead of a worker thread.
 import asyncio
 import threading
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
+from vector_core.errors import ErrorCode, is_error_response
 
 from mcp_docs.extraction import ocr as ocr_mod
-from mcp_docs.models import ExtractedContent, ExtractionStatus
-from mcp_docs.processing import DocumentProcessor
+from mcp_docs.models import ExtractedContent
+from mcp_docs.storage.database import compute_file_hash
 from mcp_docs.tools.indexing import index_document
 from tests.test_source_repair_safety import prepared
 
@@ -53,94 +54,74 @@ async def test_index_all_extracts_off_the_event_loop(document_store, sample_text
     assert result["errors"] is None
 
 
-async def test_index_document_tool_extracts_off_the_event_loop(document_store, sample_text):
-    document = document_store.register(sample_text)
-    document_store.update(document.id, extraction_status=ExtractionStatus.EXTRACTED)
-    indexer = MagicMock()
-    indexer.index_document = AsyncMock(return_value=3)
-    started, release = asyncio.Event(), threading.Event()
-
+async def run_index_document_tool(document_store, indexer, document, extract):
     with (
         patch("mcp_docs.tools.indexing.get_document_store", return_value=document_store),
         patch(
             "mcp_docs.tools.indexing.get_document_indexer",
             new=AsyncMock(return_value=indexer),
         ),
-        patch(
-            "mcp_docs.extraction.extractor.extract_content",
-            new=_blocking_extract(started, release),
-        ),
+        patch("mcp_docs.extraction.extractor.extract_content", new=extract),
     ):
-        task = asyncio.create_task(index_document(str(document.id)))
-        try:
-            await asyncio.wait_for(started.wait(), 2)
-            assert not task.done()
-        finally:
-            release.set()
-        result = await task
+        return await index_document(str(document.id))
+
+
+async def test_index_document_tool_extracts_off_the_event_loop(
+    document_store, sample_text, monkeypatch
+):
+    indexer, document, storage, old = prepared(document_store, sample_text, monkeypatch)
+    started, release = asyncio.Event(), threading.Event()
+
+    task = asyncio.create_task(
+        run_index_document_tool(
+            document_store, indexer, document, _blocking_extract(started, release)
+        )
+    )
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        assert not task.done()
+    finally:
+        release.set()
+    result = await task
 
     assert result["success"] is True
-    assert result["points_indexed"] == 3
-    indexer.index_document.assert_awaited_once_with(document.id, "extracted body")
+    assert result["points_indexed"] > 0
+    assert old.id not in storage.points
+    assert any(
+        "extracted body" in str(point.payload.get("content", ""))
+        for point in storage.points.values()
+    )
 
 
-def _pending_startup_index(document_store, sample_text):
-    """A processor whose startup index_all blocks until the test releases it."""
-    document = document_store.register(sample_text)
-    document_store.update(document.id, extraction_status=ExtractionStatus.EXTRACTED)
-    entered, release = asyncio.Event(), asyncio.Event()
-    cancelled = []
+def _changes_during_extraction(change):
+    def extract(*args):
+        change()
+        return ExtractedContent(text="extracted body", title=None, page_count=None, word_count=2)
 
-    async def index_all(force=False):
-        entered.set()
-        try:
-            await release.wait()
-        except asyncio.CancelledError:
-            cancelled.append(True)
-            raise
-        return {"indexed": 1}
-
-    indexer = MagicMock()
-    indexer.index_all = AsyncMock(side_effect=index_all)
-    processor = DocumentProcessor(document_store, max_workers=1, indexer=indexer)
-    return processor, indexer, entered, release, cancelled
+    return extract
 
 
-async def test_start_returns_while_startup_indexing_runs(document_store, sample_text):
-    processor, indexer, entered, release, _ = _pending_startup_index(document_store, sample_text)
+@pytest.mark.parametrize("change", ["registration", "source_file"])
+async def test_index_document_tool_does_not_publish_text_from_a_changed_source(
+    change, document_store, sample_text, monkeypatch
+):
+    indexer, document, storage, _ = prepared(document_store, sample_text, monkeypatch)
+    before = {point_id: point.model_copy(deep=True) for point_id, point in storage.points.items()}
 
-    await asyncio.wait_for(processor.start(), 2)
-    try:
-        await asyncio.wait_for(entered.wait(), 2)
-        indexer.index_all.assert_awaited_once_with(force=False)
-        release.set()
-        assert await asyncio.wait_for(processor._startup_indexing, 2) is None
-    finally:
-        await processor.stop()
+    def mutate():
+        sample_text.write_text("edited while it was being extracted")
+        if change == "registration":
+            # A concurrent rescan registered the edited file, so the file and
+            # the registration agree again, but not with the extracted text.
+            document_store.update(document.id, content_hash=compute_file_hash(sample_text))
 
+    result = await run_index_document_tool(
+        document_store, indexer, document, _changes_during_extraction(mutate)
+    )
 
-async def test_stop_cancels_unfinished_startup_indexing(document_store, sample_text):
-    processor, _, entered, _, cancelled = _pending_startup_index(document_store, sample_text)
-
-    await asyncio.wait_for(processor.start(), 2)
-    await asyncio.wait_for(entered.wait(), 2)
-    await asyncio.wait_for(processor.stop(), 2)
-
-    assert cancelled == [True]
-    assert processor._startup_indexing is None
-
-
-async def test_startup_indexing_failure_is_logged_not_raised(document_store, sample_text, caplog):
-    processor, indexer, _, _, _ = _pending_startup_index(document_store, sample_text)
-    indexer.index_all = AsyncMock(side_effect=RuntimeError("index unavailable"))
-
-    await asyncio.wait_for(processor.start(), 2)
-    try:
-        assert await asyncio.wait_for(processor._startup_indexing, 2) is None
-    finally:
-        await processor.stop()
-
-    assert "Failed to index extracted documents: index unavailable" in caplog.text
+    assert is_error_response(result)
+    assert result["error_code"] == ErrorCode.CONFLICT.value
+    assert storage.points == before
 
 
 async def test_ocr_sync_wrapper_runs_on_a_worker_thread(monkeypatch):

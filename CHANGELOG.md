@@ -4,8 +4,8 @@
 
 ### Fixed
 
-- Document extraction no longer runs on the MCP event loop. `index_all_documents` and `index_document` called the synchronous extractor inline, so extracting a large document (in particular OCR of a scanned PDF, which can take minutes) stalled every MCP request, including searches and listings, until it finished. Both now extract on a worker thread, matching the processing queue (#83).
-- Startup indexing of extracted-but-unindexed documents now runs in the background. The processor awaited the whole pass while it was being created, so the first processor-backed tool call (registering, scanning, moving or checking the status of documents) waited for all of it. Stopping the processor cancels an unfinished pass; the next start resumes from whatever is still unindexed.
+- Document extraction no longer runs on the MCP event loop. `index_all_documents` and `index_document` called the synchronous extractor inline, so extracting a large document (in particular OCR of a scanned PDF, which can take minutes) stalled the whole server until it finished, including the indexing pass the processor runs when it starts: no request was answered and no message from the client was read. Both now extract on a worker thread, matching the processing queue (#83). Operations that bind the document collection (searches and index writes) still wait for an indexing pass, which holds the collection lock while it extracts.
+- Because other requests can now run while `index_document` extracts, the indexer rechecks under the collection write lock that the document's registration and source file still match the extracted text before publishing it. A document rescanned or edited in the meantime returns a conflict and keeps its existing index.
 - The synchronous OCR entry point no longer replaces an OCR `RuntimeError` raised inside a running event loop with an unrelated "asyncio.run() cannot be called from a running event loop" error, and its docstring no longer claims it avoids blocking the caller.
 
 ## [1.5.3] - 2026-10-04

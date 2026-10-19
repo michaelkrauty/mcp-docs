@@ -13,7 +13,7 @@ from vector_core import parse_uuid_or_none
 from vector_core.errors import ErrorCode, error_response
 
 from mcp_docs.app import mcp
-from mcp_docs.models import DocumentType, ExtractionStatus
+from mcp_docs.models import DocumentType, ExtractionStatus, SourceChangedError
 from mcp_docs.singletons import get_document_indexer, get_document_store
 
 logger = logging.getLogger(__name__)
@@ -65,8 +65,12 @@ async def index_document(document_id: str) -> dict:
                 f"Document file not found: {document.path}",
             )
 
+        # Other requests run while extraction is on a worker thread, so the
+        # indexer rechecks the registration and file before publishing.
         extracted = await asyncio.to_thread(extract_content, path, DocumentType(document.doc_type))
-        points = await indexer.index_document(uuid, extracted.text)
+        points = await indexer.index_document(
+            uuid, extracted.text, expected_content_hash=document.content_hash
+        )
 
         # Update status
         store.update(uuid, extraction_status=ExtractionStatus.INDEXED)
@@ -77,6 +81,9 @@ async def index_document(document_id: str) -> dict:
             "points_indexed": points,
             "status": "indexed",
         }
+    except SourceChangedError as e:
+        logger.warning(f"Failed to index document {document_id}: {e}")
+        return error_response(ErrorCode.CONFLICT, f"Indexing failed: {e}")
     except Exception as e:
         logger.error(f"Failed to index document {document_id}: {e}")
         return error_response(ErrorCode.INTERNAL_ERROR, f"Indexing failed: {e}")
