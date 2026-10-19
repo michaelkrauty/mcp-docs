@@ -9,7 +9,7 @@
 - While pages can still be retried, a thin text-layer extraction is no longer accepted as the document's final text in place of OCR.
 - Partial results cached by earlier versions are resumed: their completed pages are recovered from the cached text and only the failed pages are OCR'd again. An entry whose text does not parse exactly is OCR'd again in full.
 - OCR cache files are written atomically, so a concurrent reader never sees a partially written entry. Concurrent extractions of the same PDF, in one server or in several server processes sharing the data directory, take turns on its cache entry (an empty `.lock` file kept next to it), so they cannot overwrite each other's progress; the later one is served the earlier one's result. Page counting and rendering through Poppler now time out after `DOCS_OCR_TIMEOUT` per page, so a hung render cannot hold that turn forever. If a finished result cannot be written to the cache, its progress is kept so a later attempt can cache it without sending any page again.
-- When Poppler returned fewer images than requested for a batch of pages, the remaining images were numbered as the wrong pages. A short batch is now rendered again one page at a time, and a page that still yields no image is charged as a failed attempt.
+- When Poppler returned fewer images than requested for a batch of pages, the remaining images were numbered as the wrong pages. A short or failed batch is now rendered again one page at a time, and a page that Poppler still fails on, times out on or renders to no image is charged as a failed attempt, so it is retried within the attempt limit instead of failing the whole OCR pass.
 
 ## [1.5.4] - 2026-10-18
 

@@ -412,7 +412,8 @@ def _render_pages(path: Path, pages: Iterable[int], batch_size: int = 20) -> dic
 
     Renders in batches to limit peak memory: only one batch of raw PIL images
     is held at a time, and the returned JPEG/PNG bytes are much smaller.
-    A page that renders to no image is left out of the result.
+    A page that Poppler fails on, times out on or renders to no image is left
+    out of the result, and the caller charges it as a failed attempt.
     """
     convert_from_path = _pdf2image().convert_from_path
     use_jpeg = settings.ocr_image_format.lower() == "jpeg"
@@ -420,19 +421,24 @@ def _render_pages(path: Path, pages: Iterable[int], batch_size: int = 20) -> dic
     jpeg_quality = settings.ocr_jpeg_quality
     images: dict[int, bytes] = {}
 
-    def render(first: int, last: int) -> list[Any]:
-        # Each page gets the per-page OCR timeout, so a hung Poppler cannot
-        # hold the file's cache lock forever.
-        return list(
-            convert_from_path(
-                str(path),
-                dpi=settings.ocr_dpi,
-                first_page=first,
-                last_page=last,
-                fmt="png",
-                timeout=settings.ocr_timeout * (last - first + 1),
+    def render(first: int, last: int) -> list[Any] | None:
+        """Images of pages first to last, or None if Poppler failed."""
+        try:
+            # Each page gets the per-page OCR timeout, so a hung Poppler
+            # cannot hold the file's cache lock forever.
+            return list(
+                convert_from_path(
+                    str(path),
+                    dpi=settings.ocr_dpi,
+                    first_page=first,
+                    last_page=last,
+                    fmt="png",
+                    timeout=settings.ocr_timeout * (last - first + 1),
+                )
             )
-        )
+        except Exception as e:
+            logger.warning(f"Rendering pages {first}-{last} of {path.name} failed: {e}")
+            return None
 
     def prepare(page: int, img: Any) -> None:
         images[page] = _prepare_image(img, max_dim, use_jpeg, jpeg_quality)
@@ -440,24 +446,21 @@ def _render_pages(path: Path, pages: Iterable[int], batch_size: int = 20) -> dic
 
     for first, last in _page_runs(sorted(pages), batch_size):
         pil_images = render(first, last)
-        if len(pil_images) == last - first + 1:
+        if pil_images is not None and len(pil_images) == last - first + 1:
             for page, img in zip(range(first, last + 1), pil_images, strict=True):
                 prepare(page, img)
-        else:
-            # Poppler skipped a page, so the images no longer line up with
-            # page numbers. Render the run one page at a time instead.
-            logger.warning(
-                f"Got {len(pil_images)} images for pages {first}-{last} of "
-                f"{path.name}; rendering them one at a time"
-            )
-            del pil_images
+        elif first < last:
+            # Poppler failed or skipped a page, so the images cannot be
+            # matched to page numbers. Render the run one page at a time.
+            logger.warning(f"Rendering pages {first}-{last} of {path.name} one at a time")
+            pil_images = None
             for page in range(first, last + 1):
                 pil_images = render(page, page)
                 if pil_images:
                     prepare(page, pil_images[0])
 
         # Free batch memory before next batch
-        del pil_images
+        pil_images = None
 
     return images
 

@@ -32,6 +32,7 @@ from mcp_docs.models import ExtractedContent, ExtractionError
 from mcp_docs.processing.queue import _is_permanent_failure
 
 PDF = Path("scanned.pdf")
+ORIGINAL_RENDER_PAGES = ocr_mod._render_pages
 
 
 @pytest.fixture(autouse=True)
@@ -549,6 +550,47 @@ def test_render_pages_matches_a_short_batch_page_by_page(monkeypatch):
 
     assert images == {page: f"image {page}".encode() for page in (1, 3, 4)}
     assert calls == [(1, 4), (1, 1), (2, 2), (3, 3), (4, 4)]
+
+
+def test_render_pages_leaves_out_pages_poppler_fails_on(monkeypatch):
+    calls = []
+
+    class FakePdf2image:
+        @staticmethod
+        def convert_from_path(path, dpi, first_page, last_page, fmt, timeout):
+            calls.append((first_page, last_page))
+            if first_page <= 2 <= last_page:
+                raise RuntimeError("pdftoppm timed out")
+            return [f"image {page}" for page in range(first_page, last_page + 1)]
+
+    monkeypatch.setattr(ocr_mod, "_pdf2image", lambda: FakePdf2image)
+    monkeypatch.setattr(ocr_mod, "_prepare_image", lambda img, *args: img.encode())
+
+    images = ocr_mod._render_pages(PDF, [1, 2, 3, 4, 6], batch_size=4)
+
+    assert images == {page: f"image {page}".encode() for page in (1, 3, 4, 6)}
+    assert calls == [(1, 4), (1, 1), (2, 2), (3, 3), (4, 4), (6, 6)]
+
+
+def test_a_page_poppler_keeps_failing_on_runs_out_of_attempts(vision, tmp_path, monkeypatch):
+    class FakePdf2image:
+        @staticmethod
+        def convert_from_path(path, dpi, first_page, last_page, fmt, timeout):
+            if first_page <= 2 <= last_page:
+                raise RuntimeError("pdftoppm timed out")
+            return [f"image {page}" for page in range(first_page, last_page + 1)]
+
+    monkeypatch.setattr(ocr_mod, "_render_pages", ORIGINAL_RENDER_PAGES)
+    monkeypatch.setattr(ocr_mod, "_pdf2image", lambda: FakePdf2image)
+    monkeypatch.setattr(ocr_mod, "_prepare_image", lambda img, *args: img.encode())
+    for _ in range(2):
+        with pytest.raises(IncompleteOCRError):
+            extract()
+
+    result = extract()
+
+    assert result.metadata["ocr_failed_pages"] == [2]
+    assert sorted(set(vision.sent)) == [1, 3]
 
 
 @pytest.mark.parametrize(("pages", "expected"), [(3, 3), (250, 200)])
