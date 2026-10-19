@@ -175,6 +175,22 @@ def test_page_attempts_are_bounded(vision, tmp_path):
     assert vision.sent == []
 
 
+def test_a_page_the_renderer_skips_is_charged(vision, tmp_path, monkeypatch):
+    def render_without_page_2(path, pages):
+        vision.rendered.append(list(pages))
+        return {page: f"image {page}".encode() for page in pages if page != 2}
+
+    monkeypatch.setattr(ocr_mod, "_render_pages", render_without_page_2)
+    for _ in range(2):
+        with pytest.raises(IncompleteOCRError):
+            extract()
+
+    result = extract()
+
+    assert result.metadata["ocr_failed_pages"] == [2]
+    assert 2 not in vision.sent
+
+
 def test_every_page_exhausted_is_returned_but_not_cached(vision, tmp_path):
     vision.page_count = 2
     for page in (1, 2):
@@ -342,7 +358,20 @@ def test_connection_failure_and_open_breaker_are_endpoint_outages(monkeypatch):
         asyncio.run(client.ocr_image(b"img"))
 
 
-def test_timeouts_count_against_the_page(monkeypatch):
+@pytest.mark.parametrize("timeout", [httpx.ConnectTimeout, httpx.PoolTimeout])
+def test_timeouts_before_the_request_is_sent_are_endpoint_outages(monkeypatch, timeout):
+    client = VisionOCRClient(base_url="http://vision.invalid", model="m")
+
+    def unreachable(request):
+        raise timeout("timed out", request=request)
+
+    respond(monkeypatch, client, unreachable)
+
+    with pytest.raises(VisionOCRUnavailableError):
+        asyncio.run(client.ocr_image(b"img"))
+
+
+def test_read_timeouts_count_against_the_page(monkeypatch):
     client = VisionOCRClient(base_url="http://vision.invalid", model="m")
 
     def slow(request):
@@ -371,6 +400,25 @@ def test_render_pages_maps_each_requested_page_to_its_image(monkeypatch):
 
     assert images == {page: f"image {page}".encode() for page in (1, 2, 5, 6, 7, 9)}
     assert calls == [(1, 2), (5, 6), (7, 7), (9, 9)]
+
+
+def test_render_pages_matches_a_short_batch_page_by_page(monkeypatch):
+    calls = []
+
+    class FakePdf2image:
+        @staticmethod
+        def convert_from_path(path, dpi, first_page, last_page, fmt):
+            calls.append((first_page, last_page))
+            # Poppler skips page 2, so a batch comes back one image short.
+            return [f"image {page}" for page in range(first_page, last_page + 1) if page != 2]
+
+    monkeypatch.setattr(ocr_mod, "_pdf2image", lambda: FakePdf2image)
+    monkeypatch.setattr(ocr_mod, "_prepare_image", lambda img, *args: img.encode())
+
+    images = ocr_mod._render_pages(PDF, [1, 2, 3, 4], batch_size=4)
+
+    assert images == {page: f"image {page}".encode() for page in (1, 3, 4)}
+    assert calls == [(1, 4), (1, 1), (2, 2), (3, 3), (4, 4)]
 
 
 @pytest.mark.parametrize(("pages", "expected"), [(3, 3), (250, 200)])

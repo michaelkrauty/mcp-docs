@@ -21,9 +21,10 @@ class VisionOCRError(Exception):
 class VisionOCRUnavailableError(VisionOCRError):
     """The endpoint could not serve the request, so the failure says nothing about the page.
 
-    Raised for connection failures, an open circuit breaker, and HTTP statuses
-    that signal an overloaded or restarting endpoint. OCR retries these pages
-    without counting the failure against them.
+    Raised for connection failures and connect timeouts, an open circuit
+    breaker, and HTTP statuses that signal an overloaded or restarting
+    endpoint. OCR retries these pages without counting the failure against
+    them.
     """
 
 
@@ -190,6 +191,14 @@ Begin OCR transcription:"""
 
             self._record_success()
             return content
+
+        except (httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+            # The request never reached the endpoint, so the page was not tried.
+            self._record_failure()
+            raise VisionOCRUnavailableError(
+                f"Vision OCR request for page {page_num} could not be sent to "
+                f"{self.base_url}: {type(e).__name__}"
+            ) from e
 
         except httpx.TimeoutException as e:
             self._record_failure()
