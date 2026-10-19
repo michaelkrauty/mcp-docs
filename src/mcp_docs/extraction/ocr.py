@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -13,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from vector_core import file_lock
 from vector_core.settings import settings as vector_settings
 
 from mcp_docs.extraction.vision_client import (
@@ -30,16 +32,30 @@ class IncompleteOCRError(ExtractionError):
     """OCR left pages that a later attempt may still complete.
 
     Completed pages are kept as progress, so the next attempt only sends the
-    pages listed in ``failed_pages`` to the vision endpoint.
+    pages listed in ``failed_pages`` to the vision endpoint. If the progress
+    could not be saved, ``progress_error`` holds the reason and the next
+    attempt starts from the last progress that was saved.
     """
 
-    def __init__(self, filename: str, failed_pages: list[int], page_count: int) -> None:
+    def __init__(
+        self,
+        filename: str,
+        failed_pages: list[int],
+        page_count: int,
+        progress_error: OSError | None = None,
+    ) -> None:
         self.failed_pages = failed_pages
         self.page_count = page_count
+        self.progress_error = progress_error
+        outcome = (
+            "Completed pages are kept."
+            if progress_error is None
+            else f"Progress could not be saved ({progress_error}), so the next attempt "
+            "starts from the last saved progress."
+        )
         super().__init__(
             f"OCR incomplete for {filename}: {len(failed_pages)} of {page_count} pages "
-            f"failed and will be retried ({_describe_pages(failed_pages)}). "
-            "Completed pages are kept."
+            f"failed and will be retried ({_describe_pages(failed_pages)}). {outcome}"
         )
 
 
@@ -226,18 +242,20 @@ def _load_progress(cache_key: str, page_count: int) -> _OCRProgress | None:
 
 
 def _save_progress(cache_key: str, progress: _OCRProgress) -> None:
-    try:
-        _write_json_atomic(
-            _get_progress_path(cache_key),
-            {
-                "version": _PROGRESS_VERSION,
-                "page_count": progress.page_count,
-                "pages": {str(page): text for page, text in sorted(progress.pages.items())},
-                "attempts": {str(page): n for page, n in sorted(progress.attempts.items())},
-            },
-        )
-    except Exception as e:
-        logger.warning(f"Failed to save OCR progress {cache_key[:12]}...: {e}")
+    """Save progress for the next attempt.
+
+    Raises:
+        OSError: If the progress file cannot be written
+    """
+    _write_json_atomic(
+        _get_progress_path(cache_key),
+        {
+            "version": _PROGRESS_VERSION,
+            "page_count": progress.page_count,
+            "pages": {str(page): text for page, text in sorted(progress.pages.items())},
+            "attempts": {str(page): n for page, n in sorted(progress.attempts.items())},
+        },
+    )
 
 
 def _remove_progress(cache_key: str) -> None:
@@ -519,6 +537,9 @@ async def _extract_with_cache(path: Path) -> ExtractedContent:
     A page is given up on, keeping its placeholder, after ocr_max_page_attempts
     failures charged to it; endpoint outages are not charged.
 
+    Blocks while another extraction of the same file, in this process or
+    another, is running; callers run this on its own loop in a worker thread.
+
     Raises:
         IncompleteOCRError: If pages failed and can still be retried
         ExtractionError: If the PDF cannot be rendered
@@ -529,6 +550,16 @@ async def _extract_with_cache(path: Path) -> ExtractedContent:
         return await extract_scanned_pdf(path)
 
     cache_key = _get_cache_key(path)
+    # Concurrent extractions of one file would start from the same progress
+    # and overwrite each other's results, so they take turns. The lock is
+    # released if its holder dies, and the holder's OCR is bounded by the
+    # per-page timeout, so the wait needs no limit of its own.
+    with file_lock(_get_cache_path(cache_key), timeout=math.inf):
+        return await _resume_ocr(path, cache_key)
+
+
+async def _resume_ocr(path: Path, cache_key: str) -> ExtractedContent:
+    """Body of _extract_with_cache, run while holding the file's cache lock."""
     cached = _load_from_cache(cache_key)
     if cached is not None and _is_final(cached):
         return cached
@@ -557,7 +588,11 @@ async def _extract_with_cache(path: Path) -> ExtractedContent:
 
     remaining = progress.pending(max_attempts)
     if remaining:
-        _save_progress(cache_key, progress)
+        try:
+            _save_progress(cache_key, progress)
+        except OSError as e:
+            logger.error(f"Failed to save OCR progress {cache_key[:12]}...: {e}")
+            raise IncompleteOCRError(path.name, remaining, page_count, e) from e
         raise IncompleteOCRError(path.name, remaining, page_count)
 
     result = progress.to_content(exhausted=True)

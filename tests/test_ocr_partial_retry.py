@@ -11,6 +11,9 @@ The vision endpoint and PDF rendering are faked; nothing touches the network.
 
 import asyncio
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
@@ -173,6 +176,51 @@ def test_page_attempts_are_bounded(vision, tmp_path):
     vision.sent.clear()
     assert extract().text == result.text
     assert vision.sent == []
+
+
+def test_progress_that_cannot_be_saved_is_reported(vision, tmp_path, monkeypatch):
+    vision.fail(2, timeout(2))
+
+    def disk_full(path, data):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(ocr_mod, "_write_json_atomic", disk_full)
+
+    with pytest.raises(IncompleteOCRError, match="Progress could not be saved") as raised:
+        extract()
+
+    assert raised.value.failed_pages == [2]
+    assert isinstance(raised.value.progress_error, OSError)
+    assert not progress_file(tmp_path).exists()
+
+
+def test_concurrent_extractions_of_the_same_file_take_turns(vision, tmp_path, monkeypatch):
+    first_ocr_started, release = threading.Event(), threading.Event()
+    send = vision.ocr_image
+
+    async def held_until_released(image_bytes, page_num=1, image_format="png"):
+        first_ocr_started.set()
+        assert release.wait(5), "Test did not release the first extraction"
+        return await send(image_bytes, page_num, image_format)
+
+    monkeypatch.setattr(vision, "ocr_image", held_until_released)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(extract)
+        try:
+            assert first_ocr_started.wait(5)
+            second = pool.submit(extract)
+            # Give an unserialized second extraction time to start its own OCR.
+            time.sleep(0.3)
+            assert vision.rendered == [[1, 2, 3]]
+        finally:
+            release.set()
+        results = first.result(5), second.result(5)
+
+    # The second extraction waited, then read the first one's cached result.
+    assert vision.rendered == [[1, 2, 3]]
+    assert sorted(vision.sent) == [1, 2, 3]
+    assert results[0].text == results[1].text
 
 
 def test_a_page_the_renderer_skips_is_charged(vision, tmp_path, monkeypatch):
@@ -358,7 +406,7 @@ def test_connection_failure_and_open_breaker_are_endpoint_outages(monkeypatch):
         asyncio.run(client.ocr_image(b"img"))
 
 
-@pytest.mark.parametrize("timeout", [httpx.ConnectTimeout, httpx.PoolTimeout])
+@pytest.mark.parametrize("timeout", [httpx.ConnectTimeout, httpx.PoolTimeout, httpx.WriteTimeout])
 def test_timeouts_before_the_request_is_sent_are_endpoint_outages(monkeypatch, timeout):
     client = VisionOCRClient(base_url="http://vision.invalid", model="m")
 
