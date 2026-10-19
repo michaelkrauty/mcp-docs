@@ -194,6 +194,31 @@ def test_progress_that_cannot_be_saved_is_reported(vision, tmp_path, monkeypatch
     assert not progress_file(tmp_path).exists()
 
 
+def test_progress_is_kept_when_the_finished_result_cannot_be_cached(vision, tmp_path, monkeypatch):
+    vision.fail(2, timeout(2))
+    with pytest.raises(IncompleteOCRError):
+        extract()
+    write = ocr_mod._write_json_atomic
+
+    def cache_disk_full(path, data):
+        if path == full_cache(tmp_path):
+            raise OSError(28, "No space left on device")
+        write(path, data)
+
+    monkeypatch.setattr(ocr_mod, "_write_json_atomic", cache_disk_full)
+    result = extract()
+    assert "ocr_failed_pages" not in result.metadata
+    assert not full_cache(tmp_path).exists()
+
+    monkeypatch.setattr(ocr_mod, "_write_json_atomic", write)
+    vision.sent.clear()
+
+    assert extract().text == result.text
+    assert vision.sent == []
+    assert full_cache(tmp_path).exists()
+    assert not progress_file(tmp_path).exists()
+
+
 def test_concurrent_extractions_of_the_same_file_take_turns(vision, tmp_path, monkeypatch):
     first_ocr_started, release = threading.Event(), threading.Event()
     send = vision.ocr_image

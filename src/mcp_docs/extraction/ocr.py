@@ -121,8 +121,8 @@ def _load_from_cache(cache_key: str) -> ExtractedContent | None:
         return None
 
 
-def _save_to_cache(cache_key: str, result: ExtractedContent) -> None:
-    """Save OCR result to cache."""
+def _save_to_cache(cache_key: str, result: ExtractedContent) -> bool:
+    """Save OCR result to cache. Returns whether it was saved."""
     cache_path = _get_cache_path(cache_key)
     try:
         data = {
@@ -134,8 +134,10 @@ def _save_to_cache(cache_key: str, result: ExtractedContent) -> None:
         }
         _write_json_atomic(cache_path, data)
         logger.debug(f"Saved OCR result to cache: {cache_key[:12]}...")
+        return True
     except Exception as e:
         logger.warning(f"Failed to save OCR cache {cache_key}: {e}")
+        return False
 
 
 def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
@@ -599,9 +601,15 @@ async def _resume_ocr(path: Path, cache_key: str) -> ExtractedContent:
     # Do not cache a result in which every page failed: it is never accepted
     # as document content, and serving it from the cache would stop OCR from
     # being retried until the file's mtime changes.
-    if not _all_pages_failed(result):
-        _save_to_cache(cache_key, result)
-    _remove_progress(cache_key)
+    if _all_pages_failed(result) or _save_to_cache(cache_key, result):
+        _remove_progress(cache_key)
+        return result
+    # The result could not be cached. Keep the finished progress instead, so
+    # the next attempt can cache it without sending any page again.
+    try:
+        _save_progress(cache_key, progress)
+    except OSError as e:
+        logger.error(f"Failed to save OCR progress {cache_key[:12]}...: {e}")
     return result
 
 
