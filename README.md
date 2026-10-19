@@ -222,7 +222,8 @@ file_count: 42
 | `DOCS_OCR_IMAGE_MAX_DIMENSION` | `1536` | Max image width/height sent to vision model |
 | `DOCS_OCR_IMAGE_FORMAT` | `jpeg` | Image format: `jpeg` (smaller) or `png` (lossless) |
 | `DOCS_OCR_JPEG_QUALITY` | `90` | JPEG quality (1-100) if using jpeg format |
-| `DOCS_OCR_CACHE_ENABLED` | `true` | Cache OCR results by file metadata |
+| `DOCS_OCR_CACHE_ENABLED` | `true` | Cache OCR results and per-page progress by file metadata |
+| `DOCS_OCR_MAX_PAGE_ATTEMPTS` | `3` | Failed OCR attempts per page before keeping a `[OCR failed for page N]` placeholder (endpoint outages are not counted) |
 | `DOCS_OCR_CONCURRENCY` | `4` | Max concurrent OCR page requests |
 | `DOCS_MAX_CHUNK_CHARS` | `80000` | Chunk size (~20k tokens) |
 | `DOCS_CHUNK_OVERLAP_CHARS` | `500` | Overlap between chunks |

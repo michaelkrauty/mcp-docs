@@ -18,6 +18,19 @@ class VisionOCRError(Exception):
     pass
 
 
+class VisionOCRUnavailableError(VisionOCRError):
+    """The endpoint could not serve the request, so the failure says nothing about the page.
+
+    Raised for connection failures, an open circuit breaker, and HTTP statuses
+    that signal an overloaded or restarting endpoint. OCR retries these pages
+    without counting the failure against them.
+    """
+
+
+# Statuses that describe the endpoint's availability rather than the request.
+_UNAVAILABLE_STATUSES = frozenset({408, 429, 502, 503, 504})
+
+
 class VisionOCRClient:
     """
     OCR via vision LLM using OpenAI-compatible API.
@@ -80,7 +93,7 @@ Begin OCR transcription:"""
         if cls._circuit_open_until is not None:
             if time.time() < cls._circuit_open_until:
                 remaining = cls._circuit_open_until - time.time()
-                raise VisionOCRError(
+                raise VisionOCRUnavailableError(
                     f"Vision OCR circuit breaker open. "
                     f"Service unavailable for {remaining:.0f}s after "
                     f"{cls._max_failures} consecutive failures."
@@ -188,14 +201,19 @@ Begin OCR transcription:"""
         except httpx.HTTPStatusError as e:
             self._record_failure()
             error_detail = e.response.text[:500] if e.response.text else "No details"
-            raise VisionOCRError(
+            error_type = (
+                VisionOCRUnavailableError
+                if e.response.status_code in _UNAVAILABLE_STATUSES
+                else VisionOCRError
+            )
+            raise error_type(
                 f"Vision OCR failed for page {page_num}: "
                 f"HTTP {e.response.status_code} - {error_detail}"
             ) from e
 
         except httpx.ConnectError as e:
             self._record_failure()
-            raise VisionOCRError(
+            raise VisionOCRUnavailableError(
                 f"Cannot connect to vision OCR server at {self.base_url}. "
                 f"Is the server running? Error: {e}"
             ) from e

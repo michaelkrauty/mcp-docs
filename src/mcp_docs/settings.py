@@ -27,7 +27,8 @@ class DocsSettings(VectorCoreSettingsMixin, BaseSettings):
     ocr_image_max_dimension: int = 1536  # Max image width/height for vision model
     ocr_image_format: str = "jpeg"  # Image format: jpeg (smaller) or png (lossless)
     ocr_jpeg_quality: int = 90  # JPEG quality (1-100) if using jpeg format
-    ocr_cache_enabled: bool = True  # Cache OCR results by file metadata
+    ocr_cache_enabled: bool = True  # Cache OCR results and page progress by file metadata
+    ocr_max_page_attempts: int = 3  # Failed OCR attempts charged to a page before giving up on it
     ocr_concurrency: int = 4  # Max concurrent OCR page requests
 
     # Chunking thresholds

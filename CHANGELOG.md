@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.5.5] - 2026-10-19
+
+### Fixed
+
+- A scanned PDF whose OCR failed on some pages is retried instead of being stored with permanent gaps. Any page whose vision request failed (a timeout, an overloaded or restarting endpoint, an open circuit breaker) became an `[OCR failed for page N]` placeholder, and unless every page failed, that partial result was cached by file path, size and mtime and indexed as the document's text, so the missing pages never came back until the file changed. Completed pages are now saved as progress and extraction fails with a retryable error naming the remaining pages; the next attempt (failed documents are retried at startup, and `index_all` keeps the previous index meanwhile) renders and sends only those pages. A complete result is cached as before.
+- A page is given up on after `DOCS_OCR_MAX_PAGE_ATTEMPTS` (default 3) failures charged to it, and keeps its placeholder, so one page that always fails cannot hold its document back forever. Connection failures, an open circuit breaker, and HTTP 408, 429, 502, 503 and 504 describe the endpoint rather than the page and are not charged.
+- While pages can still be retried, a thin text-layer extraction is no longer accepted as the document's final text in place of OCR.
+- Partial results cached by earlier versions are resumed: their completed pages are recovered from the cached text and only the failed pages are OCR'd again. An entry whose text does not parse exactly is OCR'd again in full.
+- OCR cache files are written atomically, so a concurrent reader never sees a partially written entry.
+
 ## [1.5.4] - 2026-10-18
 
 ### Fixed
