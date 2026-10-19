@@ -226,7 +226,7 @@ file_count: 42
 | `DOCS_OCR_CONCURRENCY` | `4` | Max concurrent OCR page requests |
 | `DOCS_MAX_CHUNK_CHARS` | `80000` | Chunk size (~20k tokens) |
 | `DOCS_CHUNK_OVERLAP_CHARS` | `500` | Overlap between chunks |
-| `DOCS_MAX_WORKERS` | `2` | Background processing workers |
+| `DOCS_MAX_WORKERS` | `2` | Background processing workers, and the most `index_document` extractions run at once |
 | `DOCS_MAX_TAGS_PER_DOCUMENT` | `20` | Tag limit |
 | `DOCS_MAX_TAG_LENGTH` | `50` | Maximum length of a single tag |
 

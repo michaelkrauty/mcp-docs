@@ -260,8 +260,8 @@ class DocumentIndexer(EmbeddingCollection):
             Number of points indexed
 
         Raises:
-            SourceChangedError: If the document or its source changed since
-                ``content`` was extracted
+            SourceChangedError: If the document was deleted, or it or its
+                source changed, since ``content`` was extracted
         """
         await self._ensure_components()
         await self.ensure_collection()
@@ -269,6 +269,8 @@ class DocumentIndexer(EmbeddingCollection):
         # Get document metadata
         document = self.document_store.read(document_id)
         if document is None:
+            if expected_content_hash is not None:
+                raise SourceChangedError("Document was deleted during extraction")
             logger.error(f"Document not found: {document_id}")
             return 0
         if expected_content_hash is not None:

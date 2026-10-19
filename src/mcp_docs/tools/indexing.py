@@ -7,6 +7,7 @@ Tools:
 
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from vector_core import parse_uuid_or_none
@@ -14,9 +15,17 @@ from vector_core.errors import ErrorCode, error_response
 
 from mcp_docs.app import mcp
 from mcp_docs.models import DocumentType, ExtractionStatus, SourceChangedError
+from mcp_docs.settings import settings
 from mcp_docs.singletons import get_document_indexer, get_document_store
 
 logger = logging.getLogger(__name__)
+
+# index_document extracts on its own bounded pool, so a burst of requests runs
+# no more extractions (and OCR passes) at once than the processing queue does.
+_extraction_pool = ThreadPoolExecutor(
+    max_workers=settings.max_workers,
+    thread_name_prefix="doc-index-",
+)
 
 
 @mcp.tool()
@@ -67,7 +76,9 @@ async def index_document(document_id: str) -> dict:
 
         # Other requests run while extraction is on a worker thread, so the
         # indexer rechecks the registration and file before publishing.
-        extracted = await asyncio.to_thread(extract_content, path, DocumentType(document.doc_type))
+        extracted = await asyncio.get_running_loop().run_in_executor(
+            _extraction_pool, extract_content, path, DocumentType(document.doc_type)
+        )
         points = await indexer.index_document(
             uuid, extracted.text, expected_content_hash=document.content_hash
         )
