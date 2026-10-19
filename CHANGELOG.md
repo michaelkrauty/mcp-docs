@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.5.5] - 2026-10-19
+
+### Fixed
+
+- A scanned PDF whose OCR failed on some pages is retried instead of being stored with permanent gaps. Any page whose vision request failed (a timeout, an overloaded or restarting endpoint, an open circuit breaker) became an `[OCR failed for page N]` placeholder, and unless every page failed, that partial result was cached by file path, size and mtime and indexed as the document's text, so the missing pages never came back until the file changed. Completed pages are now saved as progress and extraction fails with a retryable error naming the remaining pages (and saying so if the progress could not be saved); the next attempt (failed documents are retried at startup, and `index_all` keeps the previous index meanwhile) renders and sends only those pages. A complete result is cached as before.
+- A page is given up on after `DOCS_OCR_MAX_PAGE_ATTEMPTS` (default 3) failures charged to it, and keeps its placeholder, so one page that always fails cannot hold its document back forever. The result records how many attempts its failed pages used and keeps its page progress, so raising the limit later resumes those pages without sending the completed ones again. Connection failures, timeouts and write errors before the request was fully sent, an open circuit breaker, and HTTP 408, 429, 502, 503 and 504 describe the endpoint rather than the page and are not charged.
+- While pages can still be retried, a thin text-layer extraction is no longer accepted as the document's final text in place of OCR.
+- Partial results cached by earlier versions are resumed: their completed pages are recovered from the cached text and only the failed pages are OCR'd again. An entry whose text does not parse exactly is OCR'd again in full.
+- OCR cache files are written atomically, so a concurrent reader never sees a partially written entry. Concurrent extractions of the same PDF, in one server or in several server processes sharing the data directory, take turns on its cache entry (an empty `.lock` file kept next to it), so they cannot overwrite each other's progress; the later one is served the earlier one's result. Page counting and rendering through Poppler now time out after `DOCS_OCR_TIMEOUT` per page, so a hung render cannot hold that turn forever. If a finished result cannot be written to the cache, its progress is kept so a later attempt can cache it without sending any page again.
+- When Poppler returned fewer images than requested for a batch of pages, the remaining images were numbered as the wrong pages. A short or failed batch is now rendered again one page at a time, and a page that Poppler still fails on, times out on or renders to no image is charged as a failed attempt, so it is retried within the attempt limit instead of failing the whole OCR pass.
+
 ## [1.5.4] - 2026-10-18
 
 ### Fixed

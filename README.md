@@ -217,12 +217,13 @@ file_count: 42
 | `DOCS_OCR_VISION_URL` | `""` | OpenAI-compatible vision endpoint for OCR (empty = OCR disabled) |
 | `DOCS_OCR_VISION_MODEL` | `""` | Vision model name (empty = let endpoint decide) |
 | `DOCS_OCR_DPI` | `300` | DPI for PDF page rendering |
-| `DOCS_OCR_TIMEOUT` | `180` | Per-page OCR timeout in seconds |
+| `DOCS_OCR_TIMEOUT` | `180` | Per-page timeout in seconds for OCR requests and for rendering pages with Poppler |
 | `DOCS_OCR_MAX_PAGES` | `200` | Maximum pages to OCR per document |
 | `DOCS_OCR_IMAGE_MAX_DIMENSION` | `1536` | Max image width/height sent to vision model |
 | `DOCS_OCR_IMAGE_FORMAT` | `jpeg` | Image format: `jpeg` (smaller) or `png` (lossless) |
 | `DOCS_OCR_JPEG_QUALITY` | `90` | JPEG quality (1-100) if using jpeg format |
-| `DOCS_OCR_CACHE_ENABLED` | `true` | Cache OCR results by file metadata |
+| `DOCS_OCR_CACHE_ENABLED` | `true` | Cache OCR results and per-page progress by file metadata |
+| `DOCS_OCR_MAX_PAGE_ATTEMPTS` | `3` | Failed OCR attempts per page before keeping a `[OCR failed for page N]` placeholder (endpoint outages are not counted; raising it retries pages already given up on) |
 | `DOCS_OCR_CONCURRENCY` | `4` | Max concurrent OCR page requests |
 | `DOCS_MAX_CHUNK_CHARS` | `80000` | Chunk size (~20k tokens) |
 | `DOCS_CHUNK_OVERLAP_CHARS` | `500` | Overlap between chunks |

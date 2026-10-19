@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from mcp_docs.extraction.notebook import extract_ipynb
+from mcp_docs.extraction.ocr import IncompleteOCRError
 from mcp_docs.extraction.office import (
     extract_doc,
     extract_docx,
@@ -108,7 +109,8 @@ class ContentExtractor:
         Strategy:
         1. Try markitdown (pdfplumber + pdfminer) — fast, local, no deps
         2. If insufficient text extracted, attempt vision LLM OCR
-        3. If OCR unavailable/fails, return whatever markitdown got
+        3. If OCR unavailable/fails, return whatever markitdown got, unless
+           OCR pages are still being retried (IncompleteOCRError propagates)
 
         Args:
             path: Path to the PDF file
@@ -150,6 +152,10 @@ class ContentExtractor:
             )
 
             ocr_result = extract_scanned_pdf_sync(path)
+        except IncompleteOCRError:
+            # Failed pages will be retried on the next attempt. Returning the
+            # thin markitdown text here would record it as the final content.
+            raise
         except Exception as e:
             logger.warning(f"OCR fallback failed for {path.name}: {e}")
             if result.word_count > 0:

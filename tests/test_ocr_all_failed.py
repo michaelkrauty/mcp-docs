@@ -2,13 +2,14 @@
 
 When the vision OCR fallback runs on a scanned PDF and every page fails, each
 page is rendered as a ``[OCR failed for page N]`` placeholder. Those placeholders
-must not be accepted as the document body or written to the OCR cache.
+must not be accepted as the document body or written to the OCR cache. The
+cache-level behaviour (what is cached, retried, or resumed) is covered in
+``test_ocr_partial_retry.py``.
 
 All tests are pure-python: the OCR boundary is monkeypatched, so nothing hits a
 vision endpoint, Qdrant, or the network.
 """
 
-import asyncio
 from pathlib import Path
 
 import pytest
@@ -73,89 +74,3 @@ class TestAllPagesFailedOcr:
 
         assert "[OCR failed for page" not in result.text
         assert result.text == "a little text"
-
-    def test_all_pages_failed_not_cached(self, monkeypatch):
-        """A fully-failed OCR result must not be written to the cache."""
-        monkeypatch.setattr(ocr_mod.settings, "ocr_cache_enabled", True)
-
-        async def fake_extract(path):
-            return _all_failed_ocr(3)
-
-        saved: list[tuple] = []
-        monkeypatch.setattr(ocr_mod, "extract_scanned_pdf", fake_extract)
-        monkeypatch.setattr(ocr_mod, "_get_cache_key", lambda path: "key123")
-        monkeypatch.setattr(ocr_mod, "_load_from_cache", lambda key: None)
-        monkeypatch.setattr(
-            ocr_mod, "_save_to_cache", lambda key, result: saved.append((key, result))
-        )
-
-        result = asyncio.run(ocr_mod._extract_with_cache(Path("scanned.pdf")))
-
-        assert saved == []  # not cached
-        assert "[OCR failed for page" in result.text  # still returned to caller
-
-    def test_partial_failure_is_still_cached(self, monkeypatch):
-        """A partially-failed OCR result (some pages succeeded) is still cached;
-        only a complete failure is skipped."""
-        monkeypatch.setattr(ocr_mod.settings, "ocr_cache_enabled", True)
-        partial = ExtractedContent(
-            text=(
-                "--- Page 1 ---\n\nthis page has plenty of real extracted text "
-                "from the document\n\n--- Page 2 ---\n\n[OCR failed for page 2]"
-            ),
-            title=None,
-            page_count=2,
-            word_count=14,
-            metadata={"ocr_method": "vision_llm", "ocr_failed_pages": [2]},
-        )
-
-        async def fake_extract(path):
-            return partial
-
-        saved: list[tuple] = []
-        monkeypatch.setattr(ocr_mod, "extract_scanned_pdf", fake_extract)
-        monkeypatch.setattr(ocr_mod, "_get_cache_key", lambda path: "key123")
-        monkeypatch.setattr(ocr_mod, "_load_from_cache", lambda key: None)
-        monkeypatch.setattr(
-            ocr_mod, "_save_to_cache", lambda key, result: saved.append((key, result))
-        )
-
-        asyncio.run(ocr_mod._extract_with_cache(Path("scanned.pdf")))
-
-        assert len(saved) == 1  # cached normally
-
-    def test_cached_all_failed_is_ignored_and_reextracted(self, monkeypatch):
-        """A previously-cached fully-failed result is ignored on read, so OCR is
-        retried (self-healing) rather than serving placeholder text."""
-        monkeypatch.setattr(ocr_mod.settings, "ocr_cache_enabled", True)
-        monkeypatch.setattr(ocr_mod, "_get_cache_key", lambda path: "key123")
-        # Cache holds a poisoned all-failed result written before the guard.
-        monkeypatch.setattr(
-            ocr_mod, "_load_from_cache", lambda key: _all_failed_ocr(2)
-        )
-
-        good = ExtractedContent(
-            text="real recovered text",
-            title=None,
-            page_count=2,
-            word_count=3,
-            metadata={"ocr_method": "vision_llm"},
-        )
-        calls: list = []
-
-        async def fake_extract(path):
-            calls.append(path)
-            return good
-
-        saved: list = []
-        monkeypatch.setattr(ocr_mod, "extract_scanned_pdf", fake_extract)
-        monkeypatch.setattr(
-            ocr_mod, "_save_to_cache", lambda key, result: saved.append(result)
-        )
-
-        result = asyncio.run(ocr_mod._extract_with_cache(Path("scanned.pdf")))
-
-        assert calls  # OCR was retried instead of returning the cached placeholder
-        assert "[OCR failed for page" not in result.text
-        assert result.text == "real recovered text"
-        assert saved == [good]  # the recovered result is cached
