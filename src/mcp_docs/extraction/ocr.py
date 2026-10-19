@@ -620,11 +620,16 @@ async def _resume_ocr(path: Path, cache_key: str) -> ExtractedContent:
     # Do not cache a result in which every page failed: it is never accepted
     # as document content, and serving it from the cache would stop OCR from
     # being retried until the file's mtime changes.
-    if _all_pages_failed(result) or _save_to_cache(cache_key, result):
+    if _all_pages_failed(result):
         _remove_progress(cache_key)
         return result
-    # The result could not be cached. Keep the finished progress instead, so
-    # the next attempt can cache it without sending any page again.
+    if _save_to_cache(cache_key, result) and "ocr_failed_pages" not in result.metadata:
+        _remove_progress(cache_key)
+        return result
+    # Keep the finished progress. If the result was not cached, the next
+    # attempt caches it without sending any page again, and if pages were
+    # given up on, a raised attempt limit resumes them from here instead of
+    # parsing page text back out of the merged result.
     try:
         _save_progress(cache_key, progress)
     except OSError as e:

@@ -51,6 +51,7 @@ class FakeVision:
         self.outcomes: dict[int, list] = {}
         self.rendered: list[list[int]] = []
         self.sent: list[int] = []
+        self.texts: dict[int, str] = {}
 
     def fail(self, page: int, *errors: Exception) -> None:
         self.outcomes.setdefault(page, []).extend(errors)
@@ -60,7 +61,7 @@ class FakeVision:
         queued = self.outcomes.get(page_num)
         if queued:
             raise queued.pop(0)
-        return f"text of page {page_num}"
+        return self.texts.get(page_num, f"text of page {page_num}")
 
 
 @pytest.fixture
@@ -171,7 +172,8 @@ def test_page_attempts_are_bounded(vision, tmp_path):
     assert result.metadata["ocr_failed_pages"] == [2]
     assert result.metadata["ocr_failed_page_attempts"] == 3
     assert full_cache(tmp_path).exists()
-    assert not progress_file(tmp_path).exists()
+    # Kept so that raising the attempt limit can resume page 2.
+    assert progress_file(tmp_path).exists()
 
     vision.sent.clear()
     assert extract().text == result.text
@@ -264,14 +266,18 @@ def test_a_page_the_renderer_skips_is_charged(vision, tmp_path, monkeypatch):
     assert 2 not in vision.sent
 
 
+@pytest.mark.parametrize("progress_kept", [True, False])
 def test_raising_the_attempt_limit_resumes_pages_that_were_given_up_on(
-    vision, tmp_path, monkeypatch
+    vision, tmp_path, monkeypatch, progress_kept
 ):
     vision.fail(2, *[timeout(2)] * 4)
     for _ in range(2):
         with pytest.raises(IncompleteOCRError):
             extract()
     assert extract().metadata["ocr_failed_pages"] == [2]
+    if not progress_kept:
+        # Recovered from the cached text and its attempt count instead.
+        progress_file(tmp_path).unlink()
 
     vision.sent.clear()
     monkeypatch.setattr(ocr_mod.settings, "ocr_max_page_attempts", 2)
@@ -287,6 +293,25 @@ def test_raising_the_attempt_limit_resumes_pages_that_were_given_up_on(
     assert vision.sent == [2, 2]
     assert "ocr_failed_pages" not in result.metadata
     assert "text of page 1" in result.text and "text of page 2" in result.text
+    assert not progress_file(tmp_path).exists()
+
+
+def test_a_raised_limit_resumes_pages_whose_text_looks_like_a_page_header(
+    vision, tmp_path, monkeypatch
+):
+    vision.texts[1] = "Contents\n\n--- Page 3 ---\n\nquoted from the index"
+    vision.fail(2, *[timeout(2)] * 3)
+    for _ in range(2):
+        with pytest.raises(IncompleteOCRError):
+            extract()
+    assert extract().metadata["ocr_failed_pages"] == [2]
+
+    vision.sent.clear()
+    monkeypatch.setattr(ocr_mod.settings, "ocr_max_page_attempts", 4)
+    result = extract()
+
+    assert vision.sent == [2]
+    assert "quoted from the index" in result.text and "text of page 2" in result.text
 
 
 def test_every_page_exhausted_is_returned_but_not_cached(vision, tmp_path):
