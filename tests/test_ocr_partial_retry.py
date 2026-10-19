@@ -169,7 +169,7 @@ def test_page_attempts_are_bounded(vision, tmp_path):
     assert "[OCR failed for page 2]" in result.text
     assert "text of page 1" in result.text and "text of page 3" in result.text
     assert result.metadata["ocr_failed_pages"] == [2]
-    assert result.metadata["ocr_attempts_exhausted"] is True
+    assert result.metadata["ocr_failed_page_attempts"] == 3
     assert full_cache(tmp_path).exists()
     assert not progress_file(tmp_path).exists()
 
@@ -262,6 +262,31 @@ def test_a_page_the_renderer_skips_is_charged(vision, tmp_path, monkeypatch):
 
     assert result.metadata["ocr_failed_pages"] == [2]
     assert 2 not in vision.sent
+
+
+def test_raising_the_attempt_limit_resumes_pages_that_were_given_up_on(
+    vision, tmp_path, monkeypatch
+):
+    vision.fail(2, *[timeout(2)] * 4)
+    for _ in range(2):
+        with pytest.raises(IncompleteOCRError):
+            extract()
+    assert extract().metadata["ocr_failed_pages"] == [2]
+
+    vision.sent.clear()
+    monkeypatch.setattr(ocr_mod.settings, "ocr_max_page_attempts", 2)
+    assert extract().metadata["ocr_failed_pages"] == [2]
+    assert vision.sent == []
+
+    # Page 2 has used 3 attempts, so a limit of 5 leaves it two more.
+    monkeypatch.setattr(ocr_mod.settings, "ocr_max_page_attempts", 5)
+    with pytest.raises(IncompleteOCRError):
+        extract()
+    result = extract()
+
+    assert vision.sent == [2, 2]
+    assert "ocr_failed_pages" not in result.metadata
+    assert "text of page 1" in result.text and "text of page 2" in result.text
 
 
 def test_every_page_exhausted_is_returned_but_not_cached(vision, tmp_path):
@@ -467,17 +492,19 @@ def test_render_pages_maps_each_requested_page_to_its_image(monkeypatch):
 
     class FakePdf2image:
         @staticmethod
-        def convert_from_path(path, dpi, first_page, last_page, fmt):
-            calls.append((first_page, last_page))
+        def convert_from_path(path, dpi, first_page, last_page, fmt, timeout):
+            calls.append((first_page, last_page, timeout))
             return [f"image {page}" for page in range(first_page, last_page + 1)]
 
     monkeypatch.setattr(ocr_mod, "_pdf2image", lambda: FakePdf2image)
     monkeypatch.setattr(ocr_mod, "_prepare_image", lambda img, *args: img.encode())
+    monkeypatch.setattr(ocr_mod.settings, "ocr_timeout", 10)
 
     images = ocr_mod._render_pages(PDF, [9, 1, 2, 5, 6, 7], batch_size=2)
 
     assert images == {page: f"image {page}".encode() for page in (1, 2, 5, 6, 7, 9)}
-    assert calls == [(1, 2), (5, 6), (7, 7), (9, 9)]
+    # Each call is bounded by the per-page timeout for every page it renders.
+    assert calls == [(1, 2, 20), (5, 6, 20), (7, 7, 10), (9, 9, 10)]
 
 
 def test_render_pages_matches_a_short_batch_page_by_page(monkeypatch):
@@ -485,7 +512,7 @@ def test_render_pages_matches_a_short_batch_page_by_page(monkeypatch):
 
     class FakePdf2image:
         @staticmethod
-        def convert_from_path(path, dpi, first_page, last_page, fmt):
+        def convert_from_path(path, dpi, first_page, last_page, fmt, timeout):
             calls.append((first_page, last_page))
             # Poppler skips page 2, so a batch comes back one image short.
             return [f"image {page}" for page in range(first_page, last_page + 1) if page != 2]
@@ -501,21 +528,26 @@ def test_render_pages_matches_a_short_batch_page_by_page(monkeypatch):
 
 @pytest.mark.parametrize(("pages", "expected"), [(3, 3), (250, 200)])
 def test_count_pages_caps_at_the_configured_maximum(monkeypatch, pages, expected):
+    timeouts = []
+
     class FakePdf2image:
         @staticmethod
-        def pdfinfo_from_path(path):
+        def pdfinfo_from_path(path, timeout):
+            timeouts.append(timeout)
             return {"Pages": pages}
 
     monkeypatch.setattr(ocr_mod, "_pdf2image", lambda: FakePdf2image)
     monkeypatch.setattr(ocr_mod.settings, "ocr_max_pages", 200)
+    monkeypatch.setattr(ocr_mod.settings, "ocr_timeout", 10)
 
     assert ocr_mod._count_pages(PDF) == expected
+    assert timeouts == [10]
 
 
 def test_count_pages_rejects_an_empty_pdf(monkeypatch):
     class FakePdf2image:
         @staticmethod
-        def pdfinfo_from_path(path):
+        def pdfinfo_from_path(path, timeout):
             return {"Pages": 0}
 
     monkeypatch.setattr(ocr_mod, "_pdf2image", lambda: FakePdf2image)

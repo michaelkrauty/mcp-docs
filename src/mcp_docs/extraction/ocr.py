@@ -202,7 +202,10 @@ class _OCRProgress:
         if failed_pages:
             metadata["ocr_failed_pages"] = failed_pages
             if exhausted:
-                metadata["ocr_attempts_exhausted"] = True
+                # Lets a later, higher attempt limit resume these pages.
+                metadata["ocr_failed_page_attempts"] = min(
+                    self.attempts.get(page, 0) for page in failed_pages
+                )
 
         logger.info(
             f"OCR complete: {word_count} words from {self.page_count} pages "
@@ -270,12 +273,14 @@ def _remove_progress(cache_key: str) -> None:
 _PAGE_HEADER = re.compile(r"^--- Page (\d+) ---\n\n", re.MULTILINE)
 
 
-def _progress_from_legacy(cached: ExtractedContent | None, page_count: int) -> _OCRProgress | None:
-    """Recover completed pages from a partial result cached by an older version.
+def _progress_from_cached(cached: ExtractedContent | None, page_count: int) -> _OCRProgress | None:
+    """Recover completed pages from a cached result that has failed pages.
 
-    Older versions cached results with failed pages. Their text is the
-    ``_merge_pages`` output, so completed pages can be split back out. Anything
-    that does not parse exactly returns None, and every page is OCR'd again.
+    Older versions cached partial results, and a result whose failed pages
+    were given up on under a lower attempt limit is resumed once the limit is
+    raised. The text is the ``_merge_pages`` output, so completed pages can be
+    split back out. Anything that does not parse exactly returns None, and
+    every page is OCR'd again.
     """
     if cached is None or cached.page_count != page_count:
         return None
@@ -285,9 +290,13 @@ def _progress_from_legacy(cached: ExtractedContent | None, page_count: int) -> _
     failed_pages = set(failed)
     if not failed_pages or not failed_pages <= set(range(1, page_count + 1)):
         return None
+    spent = cached.metadata.get("ocr_failed_page_attempts")
+    progress = _OCRProgress(page_count)
+    if isinstance(spent, int):
+        progress.attempts = dict.fromkeys(failed_pages, spent)
     if page_count == 1:
         # A single page is stored without a header, and that page failed.
-        return _OCRProgress(page_count)
+        return progress
 
     text = cached.text
     headers = list(_PAGE_HEADER.finditer(text))
@@ -311,7 +320,6 @@ def _progress_from_legacy(cached: ExtractedContent | None, page_count: int) -> _
             body = text[header.end() :]
         bodies[numbers[index]] = body
 
-    progress = _OCRProgress(page_count)
     for page in range(1, page_count + 1):
         if page in failed_pages:
             if bodies.get(page) != _failed_placeholder(page):
@@ -372,7 +380,7 @@ def _count_pages(path: Path) -> int:
     """
     pdf2image = _pdf2image()
     try:
-        total_pages = pdf2image.pdfinfo_from_path(str(path))["Pages"]
+        total_pages = pdf2image.pdfinfo_from_path(str(path), timeout=settings.ocr_timeout)["Pages"]
     except Exception as e:
         raise ExtractionError(f"Failed to read PDF info: {e}") from e
 
@@ -413,6 +421,8 @@ def _render_pages(path: Path, pages: Iterable[int], batch_size: int = 20) -> dic
     images: dict[int, bytes] = {}
 
     def render(first: int, last: int) -> list[Any]:
+        # Each page gets the per-page OCR timeout, so a hung Poppler cannot
+        # hold the file's cache lock forever.
         return list(
             convert_from_path(
                 str(path),
@@ -420,6 +430,7 @@ def _render_pages(path: Path, pages: Iterable[int], batch_size: int = 20) -> dic
                 first_page=first,
                 last_page=last,
                 fmt="png",
+                timeout=settings.ocr_timeout * (last - first + 1),
             )
         )
 
@@ -520,13 +531,21 @@ def _all_pages_failed(result: ExtractedContent) -> bool:
     return page_count > 0 and failed >= page_count
 
 
+def _max_page_attempts() -> int:
+    return max(1, settings.ocr_max_page_attempts)
+
+
 def _is_final(cached: ExtractedContent) -> bool:
     """Whether a cached result may be served without running OCR again."""
     if not cached.metadata.get("ocr_failed_pages"):
         return True
-    # Failed pages are final only once their attempts ran out. Older versions
-    # cached partial results without that marker; those are resumed instead.
-    return bool(cached.metadata.get("ocr_attempts_exhausted")) and not _all_pages_failed(cached)
+    # Failed pages are final once they used up the current attempt limit.
+    # Older versions cached partial results without a count, and those are
+    # resumed, as are results given up on under a lower limit.
+    spent = cached.metadata.get("ocr_failed_page_attempts")
+    return (
+        isinstance(spent, int) and spent >= _max_page_attempts() and not _all_pages_failed(cached)
+    )
 
 
 async def _extract_with_cache(path: Path) -> ExtractedContent:
@@ -554,8 +573,8 @@ async def _extract_with_cache(path: Path) -> ExtractedContent:
     cache_key = _get_cache_key(path)
     # Concurrent extractions of one file would start from the same progress
     # and overwrite each other's results, so they take turns. The lock is
-    # released if its holder dies, and the holder's OCR is bounded by the
-    # per-page timeout, so the wait needs no limit of its own.
+    # released if its holder dies, and the holder's rendering and OCR are
+    # bounded by the per-page timeout, so the wait needs no limit of its own.
     with file_lock(_get_cache_path(cache_key), timeout=math.inf):
         return await _resume_ocr(path, cache_key)
 
@@ -570,11 +589,11 @@ async def _resume_ocr(path: Path, cache_key: str) -> ExtractedContent:
     page_count = _count_pages(path)
     progress = (
         _load_progress(cache_key, page_count)
-        or _progress_from_legacy(cached, page_count)
+        or _progress_from_cached(cached, page_count)
         or _OCRProgress(page_count)
     )
 
-    max_attempts = max(1, settings.ocr_max_page_attempts)
+    max_attempts = _max_page_attempts()
     pending = progress.pending(max_attempts)
     if pending:
         images = _render_pages(path, pending)
