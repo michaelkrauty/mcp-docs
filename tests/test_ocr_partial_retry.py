@@ -431,12 +431,14 @@ def test_connection_failure_and_open_breaker_are_endpoint_outages(monkeypatch):
         asyncio.run(client.ocr_image(b"img"))
 
 
-@pytest.mark.parametrize("timeout", [httpx.ConnectTimeout, httpx.PoolTimeout, httpx.WriteTimeout])
-def test_timeouts_before_the_request_is_sent_are_endpoint_outages(monkeypatch, timeout):
+@pytest.mark.parametrize(
+    "error", [httpx.ConnectTimeout, httpx.PoolTimeout, httpx.WriteTimeout, httpx.WriteError]
+)
+def test_failures_before_the_request_is_sent_are_endpoint_outages(monkeypatch, error):
     client = VisionOCRClient(base_url="http://vision.invalid", model="m")
 
     def unreachable(request):
-        raise timeout("timed out", request=request)
+        raise error("not sent", request=request)
 
     respond(monkeypatch, client, unreachable)
 
@@ -444,13 +446,16 @@ def test_timeouts_before_the_request_is_sent_are_endpoint_outages(monkeypatch, t
         asyncio.run(client.ocr_image(b"img"))
 
 
-def test_read_timeouts_count_against_the_page(monkeypatch):
+# The endpoint had the whole request, and a page that keeps crashing or
+# stalling it must still run out of attempts.
+@pytest.mark.parametrize("error", [httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError])
+def test_failures_after_the_request_is_sent_count_against_the_page(monkeypatch, error):
     client = VisionOCRClient(base_url="http://vision.invalid", model="m")
 
-    def slow(request):
-        raise httpx.ReadTimeout("slow", request=request)
+    def lost_response(request):
+        raise error("no response", request=request)
 
-    respond(monkeypatch, client, slow)
+    respond(monkeypatch, client, lost_response)
 
     with pytest.raises(VisionOCRError) as raised:
         asyncio.run(client.ocr_image(b"img"))
