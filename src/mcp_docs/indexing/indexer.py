@@ -13,7 +13,6 @@ from qdrant_client.models import (
     Filter,
     MatchAny,
     MatchValue,
-    PayloadSchemaType,
     PointIdsList,
     PointStruct,
     SparseVector,
@@ -45,6 +44,7 @@ from mcp_docs.models import (
     ExtractionStatus,
     SourceChangedError,
 )
+from mcp_docs.payload_indexes import DOCUMENT_PAYLOAD_INDEXES
 from mcp_docs.settings import settings
 from mcp_docs.storage.database import DocumentStore
 
@@ -118,17 +118,8 @@ class DocumentIndexer(EmbeddingCollection):
         """Ensure Qdrant collection exists with required indexes."""
         await self._ensure_components()
 
-        # Ensure payload indexes for efficient filtering (idempotent)
-        await self.storage.ensure_payload_indexes(
-            self.collection_name,
-            [
-                ("type", PayloadSchemaType.KEYWORD),
-                ("document_id", PayloadSchemaType.KEYWORD),
-                ("content_hash", PayloadSchemaType.KEYWORD),
-                ("doc_type", PayloadSchemaType.KEYWORD),
-                ("tags", PayloadSchemaType.KEYWORD),
-            ],
-        )
+        # Ensure payload indexes for filtering and keyword search (idempotent)
+        await self.storage.ensure_payload_indexes(self.collection_name, DOCUMENT_PAYLOAD_INDEXES)
 
     # ------------------------------------------------------------------
     # Sparse vocabulary accounting

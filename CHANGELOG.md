@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.6.0] - 2026-10-31
+
+### Fixed
+
+- `keyword_search` is case-insensitive, as documented. It matched with Qdrant text conditions on `content` and `filename`, but neither field had a full-text index, so Qdrant fell back to a case-sensitive substring scan: `report`, `Report` and `REPORT` each matched a different subset of passages, and a lowercase filename search for `report` missed `Annual-Report-2024.pdf`. Both fields now get a word-tokenized, lowercased full-text index with phrase matching, and the keyword is matched as a phrase on it. (#68)
+
+### Changed
+
+- `keyword_search` matches whole words, and a multi-word keyword matches those words in order. Partial words no longer match (`rep` does not find `report`), and punctuation separates words, so `annual report` matches `Annual-Report-2024.pdf`.
+- The full-text indexes are built when a document is indexed and, for a collection that does not have them yet, by the first `keyword_search` in each server process. On a collection of about 3,500 passages and 88 MB of text the one-time build takes a few seconds; afterwards the check is a no-op. If the indexes cannot be built, `keyword_search` reports the error instead of silently matching case-sensitively.
+- Pin vector-core to v1.9.0, which accepts full-text payload index declarations.
+
 ## [1.5.5] - 2026-10-19
 
 ### Fixed

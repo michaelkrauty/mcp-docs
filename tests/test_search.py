@@ -482,3 +482,76 @@ class TestKeywordSearchPagination:
         assert [r["document_id"] for r in result] == ["A", "B"]
         # The first page already yielded `limit` distinct docs: no second scroll.
         assert mock_client.scroll.await_count == 1
+
+
+class TestKeywordSearchMatching:
+    """keyword_search is documented as case-insensitive. Qdrant only matches
+    that way on a field with a full-text index, so the tool must make sure the
+    index exists and match the keyword as a phrase on it."""
+
+    @staticmethod
+    def _engine(client: AsyncMock) -> AsyncMock:
+        engine = AsyncMock()
+        engine.storage.get_client.return_value = client
+        engine.collection_operation = MagicMock(return_value=AsyncMock())
+        engine.collection_name = "physical"
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_matches_the_keyword_as_a_phrase_on_both_fields(self) -> None:
+        from qdrant_client.models import MatchPhrase
+
+        from mcp_docs.tools.search import keyword_search
+
+        client = AsyncMock()
+        client.scroll.return_value = ([], None)
+        engine = self._engine(client)
+
+        with patch(
+            "mcp_docs.tools.search.get_search_engine",
+            new=AsyncMock(return_value=engine),
+        ):
+            await keyword_search(keyword="  Annual Report ")
+
+        engine.ensure_keyword_indexes.assert_awaited_once_with("physical")
+        should = client.scroll.await_args.kwargs["scroll_filter"].should
+        assert {(c.key, c.match.phrase) for c in should} == {
+            ("content", "Annual Report"),
+            ("filename", "Annual Report"),
+        }
+        assert all(isinstance(c.match, MatchPhrase) for c in should)
+
+    @pytest.mark.asyncio
+    async def test_keyword_indexes_are_built_once_per_collection(self) -> None:
+        from mcp_docs.payload_indexes import KEYWORD_SEARCH_INDEXES
+
+        storage = MagicMock()
+        storage.ensure_payload_indexes = AsyncMock(side_effect=[RuntimeError("busy"), None, None])
+        engine = DocumentSearchEngine(
+            storage=storage, embedder=MagicMock(), global_vocab=MagicMock()
+        )
+
+        # A failed build is raised, never remembered as done.
+        with pytest.raises(RuntimeError, match="busy"):
+            await engine.ensure_keyword_indexes("first")
+        await engine.ensure_keyword_indexes("first")
+        await engine.ensure_keyword_indexes("first")
+        await engine.ensure_keyword_indexes("second")
+
+        assert [call.args for call in storage.ensure_payload_indexes.await_args_list] == [
+            ("first", KEYWORD_SEARCH_INDEXES),
+            ("first", KEYWORD_SEARCH_INDEXES),
+            ("second", KEYWORD_SEARCH_INDEXES),
+        ]
+
+    def test_indexing_declares_the_keyword_indexes(self) -> None:
+        from mcp_docs.payload_indexes import (
+            DOCUMENT_PAYLOAD_INDEXES,
+            KEYWORD_SEARCH_INDEXES,
+            KEYWORD_TEXT_INDEX,
+        )
+
+        assert all(index in DOCUMENT_PAYLOAD_INDEXES for index in KEYWORD_SEARCH_INDEXES)
+        assert {field for field, _ in KEYWORD_SEARCH_INDEXES} == {"content", "filename"}
+        assert KEYWORD_TEXT_INDEX.lowercase is True
+        assert KEYWORD_TEXT_INDEX.phrase_matching is True

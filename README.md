@@ -63,7 +63,7 @@ claude mcp add docs \
 - **Multi-Format Extraction**: PDF, DOCX, PPTX, XLSX, CSV, EPUB, XML, TXT, Markdown, Jupyter (`.ipynb`), HTML, RTF
 - **Directory Scanning**: Register root directories for automatic discovery
 - **Semantic Search**: Hybrid dense + sparse vector search via Qdrant
-- **Keyword Search**: Exact keyword/phrase matching in filenames and content
+- **Keyword Search**: Case-insensitive whole-word and phrase matching in filenames and content
 - **Hash Deduplication**: SHA-256 content hashes prevent duplicate ingestion
 - **Source Tracking**: Verify document references for fact integrity
 - **Background Processing**: Async extraction/indexing with worker queue
@@ -94,7 +94,7 @@ claude mcp add docs \
 | Tool | Description |
 |------|-------------|
 | `search_documents` | Hybrid semantic search with filters |
-| `keyword_search` | Exact keyword/phrase matching in filenames and content |
+| `keyword_search` | Case-insensitive whole-word and phrase matching in filenames and content |
 | `find_similar_documents` | Content-based similarity matching |
 | `get_document_chunks` | Retrieve indexed chunks |
 
