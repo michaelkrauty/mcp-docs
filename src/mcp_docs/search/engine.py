@@ -18,6 +18,7 @@ from vector_core.storage.embedding_sources import stored_embedding_text
 
 from mcp_docs.embedding import EmbeddingCollection, embedding_operation
 from mcp_docs.models import DocumentNotFoundError
+from mcp_docs.payload_indexes import KEYWORD_SEARCH_INDEXES
 from mcp_docs.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -147,6 +148,7 @@ class DocumentSearchEngine(EmbeddingCollection):
         self._global_vocab = global_vocab
         self._collection_name = collection_name
         self._searcher: HybridSearcher | None = None
+        self._keyword_indexed: set[str] = set()
 
     @property
     def global_vocab(self) -> GlobalVocabulary:
@@ -180,6 +182,22 @@ class DocumentSearchEngine(EmbeddingCollection):
         if self._collection_name is None:
             self._collection_name = settings.collection_name
         return self._collection_name
+
+    async def ensure_keyword_indexes(self, collection: str) -> None:
+        """Build the full-text indexes keyword search matches against.
+
+        Indexing builds them as well, but a process that only searches, or a
+        collection that predates them, may not have them yet. Without them
+        keyword conditions silently fall back to case-sensitive substring
+        matching, so a failure to build them is raised, not ignored. Checked
+        once per physical collection: a migration publishes a new one.
+        """
+        if collection in self._keyword_indexed:
+            return
+        await self._ensure_components()
+        assert self.storage is not None  # set by _ensure_components
+        await self.storage.ensure_payload_indexes(collection, KEYWORD_SEARCH_INDEXES)
+        self._keyword_indexed.add(collection)
 
     @embedding_operation()
     async def search(

@@ -2,14 +2,14 @@
 
 Tools:
 - search_documents: Search documents using hybrid semantic search
-- keyword_search: Search documents using exact keyword matching
+- keyword_search: Search documents for an exact word or phrase
 - find_similar_documents: Find documents similar to a given document
 - get_document_chunks: Get all indexed chunks for a document
 """
 
 import logging
 
-from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchText, MatchValue
+from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchPhrase, MatchValue
 from vector_core import parse_uuid_or_none, validate_limit
 from vector_core.errors import ErrorCode, error_response
 
@@ -76,13 +76,15 @@ async def keyword_search(
     search_content: bool = True,
 ) -> list[dict] | dict:
     """
-    Search documents using exact keyword matching.
+    Search documents for an exact word or phrase, ignoring case.
 
     Use this for proper nouns, specific terms, or exact phrase searches
-    where semantic search may miss results.
+    where semantic search may miss results. Matching is by whole words:
+    "invoice" does not match "invoices", and punctuation separates words,
+    so "annual report" matches the filename "Annual-Report-2024.pdf".
 
     Args:
-        keyword: Exact keyword or phrase to search for (case-insensitive)
+        keyword: Word or phrase to search for (case-insensitive)
         limit: Maximum results to return (default 100, max 1000)
         doc_type: Filter by document type (pdf, docx, txt, md, etc.)
         search_filename: Search in filenames (default True)
@@ -110,14 +112,16 @@ async def keyword_search(
     engine = await get_search_engine()
     async with engine.collection_operation(write=False):
         collection_name = engine.collection_name
+        await engine.ensure_keyword_indexes(collection_name)
     client = await engine.storage.get_client()
 
-    # Build filter conditions for keyword matching
+    # Build filter conditions for keyword matching. A phrase condition on the
+    # full-text index matches the keyword's words, in order, ignoring case.
     should_conditions = []
     if search_content:
-        should_conditions.append(FieldCondition(key="content", match=MatchText(text=keyword)))
+        should_conditions.append(FieldCondition(key="content", match=MatchPhrase(phrase=keyword)))
     if search_filename:
-        should_conditions.append(FieldCondition(key="filename", match=MatchText(text=keyword)))
+        should_conditions.append(FieldCondition(key="filename", match=MatchPhrase(phrase=keyword)))
 
     # Build must conditions for additional filters
     must_conditions = [FieldCondition(key="type", match=MatchAny(any=["document", "doc_chunk"]))]
