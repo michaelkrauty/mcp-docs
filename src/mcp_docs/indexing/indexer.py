@@ -139,7 +139,9 @@ class DocumentIndexer(EmbeddingCollection):
     # A document's token set is derived from the text of its points (summary
     # plus chunks) rather than from the raw extracted content. That is the same
     # text the removal side reads back from Qdrant, and symmetry is what keeps
-    # repeated edits from leaking document frequency.
+    # repeated edits from leaking document frequency. A tag or filename change
+    # rewrites only the summary point, so its delta is that same union with the
+    # new summary in place of the stored one, and the document count stays put.
     # ------------------------------------------------------------------
 
     def _token_set(self, texts: Iterable[str]) -> set[str]:
@@ -781,6 +783,89 @@ class DocumentIndexer(EmbeddingCollection):
             return not still_indexed
         return True
 
+    async def _read_summary_vocabulary(self, document_id: UUID) -> tuple[bool, set[str], list[str]]:
+        """Read the stored points a summary rewrite has to account for.
+
+        One scroll. Returns ``(is_indexed, old_tokens, chunk_texts)``.
+        ``old_tokens`` is the union of every canonical point's content, the
+        same set ``_indexed_token_set`` returns. ``chunk_texts`` are the
+        ``doc_chunk`` contents from that union, so the caller can swap in a
+        new summary without reading the points again. Derived embedding
+        fragments are not part of either.
+        """
+        assert self.storage is not None  # set by _ensure_components
+        payloads = await self.storage.scroll_points(
+            self.collection_name,
+            filter_conditions=[
+                FieldCondition(key="document_id", match=MatchValue(value=str(document_id))),
+            ],
+            payload_fields=["content", "type", "embedding_fragment"],
+            max_results=0,
+        )
+        texts: list[str] = []
+        chunk_texts: list[str] = []
+        for payload in payloads:
+            if is_derived_fragment(payload):
+                continue
+            content = payload.get("content")
+            text = content if isinstance(content, str) else ""
+            texts.append(text)
+            if payload.get("type") == "doc_chunk":
+                chunk_texts.append(text)
+        return bool(payloads), self._token_set(texts), chunk_texts
+
+    async def _refresh_indexed_summary(self, document: Document) -> None:
+        """Rebuild an indexed document's summary and the contribution it carries.
+
+        The summary text is ``filename | title | Tags: ...``. A tag or filename
+        change rewrites that point alone. The document's token set is the union
+        of its canonical points — what ``_indexed_token_set`` reads back — so
+        the new set is the stored chunk text plus the new summary. Terms that
+        also live in a chunk stay in the union and are not retired. The delta
+        is applied before the new summary is vectorized, which is what lets a
+        term this change introduces appear in the refreshed sparse vector. The
+        document count does not change.
+
+        ``extraction_status`` still decides whether a summary is rebuilt at
+        all, so a document that was never indexed cannot gain a point here. No
+        stored points means there is nothing to account for: the vocabulary is
+        left alone and the summary is refreshed as before. A failed read takes
+        that same path. A rebuild that fails after the delta landed is repaired
+        from whatever points are actually stored. A delta that never landed is
+        not inverted.
+
+        Best-effort: failures are logged, not raised.
+        """
+        if document.extraction_status != ExtractionStatus.INDEXED:
+            return
+
+        new_tokens: set[str] | None = None
+        applied = False
+        try:
+            indexed, old_tokens, chunk_texts = await self._read_summary_vocabulary(document.id)
+        except Exception as e:
+            logger.warning(
+                f"Could not read document {document.id} back before refreshing its "
+                f"summary; its vocabulary contribution is left unchanged: {e}"
+            )
+        else:
+            if indexed:
+                new_tokens = self._token_set([*chunk_texts, self._generate_doc_summary(document)])
+                if new_tokens != old_tokens:
+                    applied = self._update_vocabulary(
+                        added_tokens=[new_tokens],
+                        removed_tokens=[old_tokens],
+                        net_doc_change=0,
+                    )
+
+        try:
+            await self._refresh_summary(document)
+            logger.debug(f"Refreshed summary point for document {document.id}")
+        except Exception as e:
+            if applied and new_tokens is not None:
+                await self._revert_vocabulary_update(document.id, new_tokens)
+            logger.warning(f"Failed to refresh summary point for document {document.id}: {e}")
+
     async def _refresh_summary(self, document: Document) -> None:
         """Refresh auxiliary evidence without certifying an older body layout."""
         assert self.storage is not None
@@ -916,7 +1001,9 @@ class DocumentIndexer(EmbeddingCollection):
         document summary point additionally embeds the tags in its searchable
         content (see ``_generate_doc_summary``). A tag change must update both,
         or the index keeps matching and serving the document's previous tags
-        until a full reindex.
+        until a full reindex. Those summary tokens belong to the document's
+        vocabulary contribution, which is updated to the new summary before
+        that point is vectorized.
 
         Updates the tags payload on every existing point and, when the document
         is indexed, regenerates the summary point so its content and vectors
@@ -943,17 +1030,7 @@ class DocumentIndexer(EmbeddingCollection):
         except Exception as e:
             logger.warning(f"Failed to update tags payload for document {document_id}: {e}")
 
-        # The summary point embeds the tags in its content and vectors, so it
-        # must be rebuilt. Skip when the document is not indexed, to avoid
-        # creating a point for a document that is absent from the index.
-        if document.extraction_status != ExtractionStatus.INDEXED:
-            return
-
-        try:
-            await self._refresh_summary(document)
-            logger.debug(f"Refreshed summary point for document {document_id}")
-        except Exception as e:
-            logger.warning(f"Failed to refresh summary point for document {document_id}: {e}")
+        await self._refresh_indexed_summary(document)
 
     @embedding_operation(write=True)
     async def update_document_filename_in_index(self, document: Document) -> None:
@@ -964,7 +1041,9 @@ class DocumentIndexer(EmbeddingCollection):
         and the document summary point additionally embeds the filename in its
         searchable content (see ``_generate_doc_summary``). A rename must update
         both, or the index keeps reporting and matching the old basename until a
-        full reindex.
+        full reindex. Those summary tokens belong to the document's vocabulary
+        contribution, which is updated to the new summary before that point is
+        vectorized.
 
         Updates the filename payload on every existing point and, when the
         document is indexed, regenerates the summary point so its content and
@@ -991,17 +1070,7 @@ class DocumentIndexer(EmbeddingCollection):
         except Exception as e:
             logger.warning(f"Failed to update filename payload for document {document_id}: {e}")
 
-        # The summary point embeds the filename in its content and vectors, so it
-        # must be rebuilt. Skip when the document is not indexed, to avoid
-        # creating a point for a document that is absent from the index.
-        if document.extraction_status != ExtractionStatus.INDEXED:
-            return
-
-        try:
-            await self._refresh_summary(document)
-            logger.debug(f"Refreshed summary point for document {document_id}")
-        except Exception as e:
-            logger.warning(f"Failed to refresh summary point for document {document_id}: {e}")
+        await self._refresh_indexed_summary(document)
 
     @embedding_operation(write=True)
     async def update_paths_batch_in_index(self, old_prefix: str, new_prefix: str) -> int:
