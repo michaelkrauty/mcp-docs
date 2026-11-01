@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.6.1] - 2026-11-01
+
+### Fixed
+
+- Changing a document's tags or renaming its file keeps the shared sparse vocabulary in step (#87). Both rebuild the document's summary point (`filename | title | Tags: ...`) but never touched the vocabulary, so the old tag or basename kept its document frequency forever, and a new tag or name the corpus had not seen before was dropped from the refreshed summary's sparse vector, leaving the document unfindable by it in keyword-weighted search. The document's token set, the union over its stored summary and chunk text, is now swapped for one with the new summary before that summary is vectorized. A term that also appears in a chunk keeps its frequency, and the document count does not change. If the summary rebuild fails, the contribution is repaired from what is actually stored.
+
 ## [1.6.0] - 2026-10-31
 
 ### Fixed

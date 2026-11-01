@@ -21,6 +21,7 @@ from uuid import uuid4
 import pytest
 from qdrant_client.models import FieldCondition, Filter, PointStruct
 from vector_core import GlobalVocabulary
+from vector_core.storage.embedding_fragments import is_derived_fragment
 
 from mcp_docs.indexing.indexer import DOCS_CODEBASE_ID, DocumentIndexer
 from mcp_docs.models import ExtractionStatus
@@ -170,6 +171,40 @@ def _doc_freq(vocab: GlobalVocabulary, token: str) -> int:
     finally:
         conn.close()
     return row[0] if row else 0
+
+
+def _summary_point(storage: FakeStorage, document_id: Any) -> PointStruct:
+    """Canonical summary point for a document, skipping derived fragments."""
+    matches = [
+        point
+        for point in storage.points.values()
+        if (point.payload or {}).get("document_id") == str(document_id)
+        and (point.payload or {}).get("type") == "document"
+        and not is_derived_fragment(point.payload or {})
+    ]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _sparse_indices(point: PointStruct) -> list[int]:
+    vector = point.vector
+    assert isinstance(vector, dict)
+    return list(vector["sparse"].indices)
+
+
+def _assert_same_contribution(left: GlobalVocabulary, right: GlobalVocabulary) -> None:
+    """Document frequencies and the docs document count match.
+
+    A retired term stays in the append-only vocabulary at document frequency
+    0, so a token missing from the other side counts as 0.
+    """
+    assert left.get_codebase_doc_count(DOCS_CODEBASE_ID) == right.get_codebase_doc_count(
+        DOCS_CODEBASE_ID
+    )
+    left_freq = left._get_doc_freq()
+    right_freq = right._get_doc_freq()
+    for token in set(left_freq) | set(right_freq):
+        assert left_freq.get(token, 0) == right_freq.get(token, 0), token
 
 
 def _is_known(vocab: GlobalVocabulary, token: str) -> bool:
@@ -643,3 +678,248 @@ class TestStoredTokenSymmetry:
         assert _doc_freq(vocab, "beta") == 1
         assert _doc_freq(vocab, "stable") == 1
         assert vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == 1
+
+
+class TestSummaryMetadataVocabulary:
+    """Tag and filename edits rewrite only the summary point.
+
+    The document's vocabulary contribution is the union of every canonical
+    point, so the delta is that union with the new summary in place of the
+    stored one. It has to land before the summary is vectorized, and it must
+    not change the document count.
+    """
+
+    @staticmethod
+    def _indexer(store, vocab, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        indexer, storage = _make_indexer(store, vocab)
+        monkeypatch.setattr(indexer, "ensure_collection", AsyncMock())
+        return indexer, storage
+
+    @pytest.mark.asyncio
+    async def test_tag_rename_registers_the_new_term_and_retires_the_old(
+        self, tmp_path, store, vocab, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        indexer, storage = self._indexer(store, vocab, monkeypatch)
+        doc = _register(store, tmp_path, "notes.txt", "ordinarybody")
+        doc = store.update_tags(doc.id, ["zxqoldtag"])
+        await indexer.index_document(doc.id, "ordinarybody")
+        count = vocab.get_codebase_doc_count(DOCS_CODEBASE_ID)
+
+        doc = store.update_tags(doc.id, ["zxqnewtag"])
+        await indexer.update_document_tags_in_index(doc)
+
+        freqs = vocab._get_doc_freq()
+        assert freqs["zxqnewtag"] == 1
+        assert freqs["zxqoldtag"] == 0
+        assert vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == count
+        indices = _sparse_indices(_summary_point(storage, doc.id))
+        assert vocab._get_vocab()["zxqnewtag"] in indices
+        assert vocab._get_vocab()["zxqoldtag"] not in indices
+
+    @pytest.mark.asyncio
+    async def test_filename_rename_registers_the_new_term_and_retires_the_old(
+        self, tmp_path, store, vocab, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        indexer, storage = self._indexer(store, vocab, monkeypatch)
+        doc = _register(store, tmp_path, "zxqoldbasename.txt", "ordinarybody")
+        await indexer.index_document(doc.id, "ordinarybody")
+        count = vocab.get_codebase_doc_count(DOCS_CODEBASE_ID)
+
+        doc = store.update(doc.id, filename="zxqnewbasename.txt")
+        await indexer.update_document_filename_in_index(doc)
+
+        freqs = vocab._get_doc_freq()
+        assert freqs["zxqnewbasename"] == 1
+        assert freqs["zxqoldbasename"] == 0
+        assert vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == count
+        indices = _sparse_indices(_summary_point(storage, doc.id))
+        assert vocab._get_vocab()["zxqnewbasename"] in indices
+        assert vocab._get_vocab()["zxqoldbasename"] not in indices
+
+    @pytest.mark.asyncio
+    async def test_term_shared_with_a_chunk_keeps_its_document_frequency(
+        self, tmp_path, store, vocab, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A term that also lives in a chunk is still in the document's union."""
+        indexer, _ = self._indexer(store, vocab, monkeypatch)
+        doc = _register(store, tmp_path, "notes.txt", "sharedterm lives in the chunk")
+        doc = store.update_tags(doc.id, ["sharedterm"])
+        await indexer.index_document(doc.id, "sharedterm lives in the chunk")
+        count = vocab.get_codebase_doc_count(DOCS_CODEBASE_ID)
+        assert vocab._get_doc_freq()["sharedterm"] == 1
+
+        doc = store.update_tags(doc.id, ["zxqreplacement"])
+        await indexer.update_document_tags_in_index(doc)
+
+        assert vocab._get_doc_freq()["sharedterm"] == 1
+        assert vocab._get_doc_freq()["zxqreplacement"] == 1
+        assert vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == count
+
+    @pytest.mark.asyncio
+    async def test_repeated_tag_renames_match_a_fresh_registration(
+        self, tmp_path, store, vocab, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        indexer, _ = self._indexer(store, vocab, monkeypatch)
+        doc = _register(store, tmp_path, "churn.txt", "stablebody")
+        doc = store.update_tags(doc.id, ["zxqalpha"])
+        await indexer.index_document(doc.id, "stablebody")
+        for _ in range(4):
+            doc = store.update_tags(doc.id, ["zxqbeta"])
+            await indexer.update_document_tags_in_index(doc)
+            doc = store.update_tags(doc.id, ["zxqalpha"])
+            await indexer.update_document_tags_in_index(doc)
+        # Finish on the other tag. Ending where we started would also match a
+        # fresh registration if the renames never touched the vocabulary.
+        doc = store.update_tags(doc.id, ["zxqbeta"])
+        await indexer.update_document_tags_in_index(doc)
+
+        fresh = GlobalVocabulary(db_path=tmp_path / "fresh-tags.db")
+        fresh_store = DocumentStore(db_path=tmp_path / "fresh-tags-docs.db")
+        try:
+            fresh_indexer, _ = self._indexer(fresh_store, fresh, monkeypatch)
+            fresh_doc = _register(fresh_store, tmp_path, "churn.txt", "stablebody")
+            fresh_doc = fresh_store.update_tags(fresh_doc.id, ["zxqbeta"])
+            await fresh_indexer.index_document(fresh_doc.id, "stablebody")
+            _assert_same_contribution(vocab, fresh)
+        finally:
+            fresh_store.close()
+
+    @pytest.mark.asyncio
+    async def test_repeated_filename_renames_match_a_fresh_registration(
+        self, tmp_path, store, vocab, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        indexer, _ = self._indexer(store, vocab, monkeypatch)
+        doc = _register(store, tmp_path, "zxqalpha.txt", "stablebody")
+        await indexer.index_document(doc.id, "stablebody")
+        for _ in range(4):
+            doc = store.update(doc.id, filename="zxqbeta.txt")
+            await indexer.update_document_filename_in_index(doc)
+            doc = store.update(doc.id, filename="zxqalpha.txt")
+            await indexer.update_document_filename_in_index(doc)
+        doc = store.update(doc.id, filename="zxqbeta.txt")
+        await indexer.update_document_filename_in_index(doc)
+
+        fresh = GlobalVocabulary(db_path=tmp_path / "fresh-names.db")
+        fresh_store = DocumentStore(db_path=tmp_path / "fresh-names-docs.db")
+        try:
+            fresh_indexer, _ = self._indexer(fresh_store, fresh, monkeypatch)
+            fresh_doc = _register(fresh_store, tmp_path, "zxqbeta.txt", "stablebody")
+            await fresh_indexer.index_document(fresh_doc.id, "stablebody")
+            _assert_same_contribution(vocab, fresh)
+        finally:
+            fresh_store.close()
+
+    @pytest.mark.asyncio
+    async def test_summary_refresh_failure_restores_the_stored_contribution(
+        self, tmp_path, store, vocab, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A delta applied before a failed rebuild is put back in line with storage."""
+        indexer, _ = self._indexer(store, vocab, monkeypatch)
+        doc = _register(store, tmp_path, "notes.txt", "bodytoken")
+        doc = store.update_tags(doc.id, ["zxqoldtag"])
+        await indexer.index_document(doc.id, "bodytoken")
+        count = vocab.get_codebase_doc_count(DOCS_CODEBASE_ID)
+        doc = store.update_tags(doc.id, ["zxqnewtag"])
+
+        async def fail_refresh(_document) -> None:
+            raise RuntimeError("summary unavailable")
+
+        monkeypatch.setattr(indexer, "_refresh_summary", fail_refresh)
+        await indexer.update_document_tags_in_index(doc)
+
+        freqs = vocab._get_doc_freq()
+        # The new term reached the append-only vocabulary, then its document
+        # frequency was given back because the summary was never stored.
+        assert "zxqnewtag" in freqs
+        assert freqs["zxqnewtag"] == 0
+        indexed, stored = await indexer._indexed_token_set(doc.id)
+        assert indexed
+        assert "zxqoldtag" in stored
+        assert "zxqnewtag" not in stored
+        for token, freq in freqs.items():
+            assert freq == (1 if token in stored else 0), token
+        assert vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == count
+
+    @pytest.mark.asyncio
+    async def test_vocabulary_write_failure_refreshes_summary_without_compensation(
+        self, tmp_path, store, vocab, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        indexer, storage = self._indexer(store, vocab, monkeypatch)
+        doc = _register(store, tmp_path, "notes.txt", "bodytoken")
+        doc = store.update_tags(doc.id, ["zxqoldtag"])
+        await indexer.index_document(doc.id, "bodytoken")
+        count = vocab.get_codebase_doc_count(DOCS_CODEBASE_ID)
+        before = dict(vocab._get_doc_freq())
+
+        real_update = vocab.update_codebase_incremental
+        calls = {"n": 0}
+
+        def flaky(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("database is locked")
+            return real_update(*args, **kwargs)
+
+        monkeypatch.setattr(vocab, "update_codebase_incremental", flaky)
+        doc = store.update_tags(doc.id, ["zxqnewtag"])
+        await indexer.update_document_tags_in_index(doc)
+
+        # The failed write is not inverted. A mock that kept failing would hide
+        # that compensation, because the repair would fail too.
+        assert calls["n"] == 1
+        content = _summary_point(storage, doc.id).payload["content"]
+        assert "zxqnewtag" in content
+        assert "zxqoldtag" not in content
+        assert vocab._get_doc_freq() == before
+        assert "zxqnewtag" not in vocab._get_doc_freq()
+        assert vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == count
+
+    @pytest.mark.asyncio
+    async def test_unindexed_document_does_not_change_the_vocabulary(
+        self, tmp_path, store, vocab, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        indexer, _ = self._indexer(store, vocab, monkeypatch)
+        kept = _register(store, tmp_path, "kept.txt", "kepttoken")
+        await indexer.index_document(kept.id, "kepttoken")
+        before = dict(vocab._get_doc_freq())
+        count = vocab.get_codebase_doc_count(DOCS_CODEBASE_ID)
+
+        pending = _register(store, tmp_path, "pending.txt", "pendingbody")
+        pending = store.update_tags(pending.id, ["zxqpendingtag"])
+        await indexer.update_document_tags_in_index(pending)
+        pending = store.update(pending.id, filename="zxqrenamedpending.txt")
+        await indexer.update_document_filename_in_index(pending)
+
+        assert vocab._get_doc_freq() == before
+        assert vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == count
+
+    @pytest.mark.asyncio
+    async def test_unreadable_points_refresh_without_a_vocabulary_change(
+        self, tmp_path, store, vocab, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        indexer, storage = self._indexer(store, vocab, monkeypatch)
+        doc = _register(store, tmp_path, "notes.txt", "bodytoken")
+        doc = store.update_tags(doc.id, ["zxqoldtag"])
+        await indexer.index_document(doc.id, "bodytoken")
+        before = dict(vocab._get_doc_freq())
+        count = vocab.get_codebase_doc_count(DOCS_CODEBASE_ID)
+        doc = store.update_tags(doc.id, ["zxqnewtag"])
+
+        real_scroll = storage.scroll_points
+        calls = {"n": 0}
+
+        async def flaky_scroll(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("scroll failed")
+            return await real_scroll(*args, **kwargs)
+
+        storage.scroll_points = flaky_scroll
+        await indexer.update_document_tags_in_index(doc)
+
+        content = _summary_point(storage, doc.id).payload["content"]
+        assert "zxqnewtag" in content
+        assert vocab._get_doc_freq() == before
+        assert vocab.get_codebase_doc_count(DOCS_CODEBASE_ID) == count
