@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.6.2] - 2026-11-01
+
+### Changed
+
+- Pin vector-core to v1.10.1, which fixes `database is locked` errors when several processes open the same new SQLite store at once. The glossary, vocabulary and embedding cache databases this server shares with other servers are among the stores affected.
+
 ## [1.6.1] - 2026-11-01
 
 ### Fixed

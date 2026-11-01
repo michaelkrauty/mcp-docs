@@ -1002,7 +1002,7 @@ wheels = [
 
 [[package]]
 name = "mcp-docs"
-version = "1.6.1"
+version = "1.6.2"
 source = { editable = "." }
 dependencies = [
     { name = "charset-normalizer" },
@@ -1052,8 +1052,8 @@ requires-dist = [
     { name = "python-docx", specifier = "~=1.0" },
     { name = "python-pptx", specifier = "~=1.0" },
     { name = "striprtf", specifier = "~=0.0.26" },
-    { name = "vector-core", git = "https://github.com/michaelkrauty/vector-core?tag=v1.10.0" },
-    { name = "vector-core", extras = ["tokenizer"], marker = "extra == 'tokenizer'", git = "https://github.com/michaelkrauty/vector-core?tag=v1.10.0" },
+    { name = "vector-core", git = "https://github.com/michaelkrauty/vector-core?tag=v1.10.1" },
+    { name = "vector-core", extras = ["tokenizer"], marker = "extra == 'tokenizer'", git = "https://github.com/michaelkrauty/vector-core?tag=v1.10.1" },
 ]
 provides-extras = ["tokenizer", "ocr"]
 
@@ -2191,8 +2191,8 @@ wheels = [
 
 [[package]]
 name = "vector-core"
-version = "1.10.0"
-source = { git = "https://github.com/michaelkrauty/vector-core?tag=v1.10.0#514fc181dadea70704f46c7b03d16c89cf69472e" }
+version = "1.10.1"
+source = { git = "https://github.com/michaelkrauty/vector-core?tag=v1.10.1#7477602e025b95a09c49d212c2a73e14b47c6f2b" }
 dependencies = [
     { name = "httpx" },
     { name = "pathspec" },
