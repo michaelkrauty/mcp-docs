@@ -819,8 +819,8 @@ class DocumentIndexer(EmbeddingCollection):
 
         The summary text is ``filename | title | Tags: ...``. A tag or filename
         change rewrites that point alone. The document's token set is the union
-        of its canonical points — what ``_indexed_token_set`` reads back — so
-        the new set is the stored chunk text plus the new summary. Terms that
+        of its canonical points, which is what ``_indexed_token_set`` reads
+        back, so the new set is the stored chunk text plus the new summary. Terms that
         also live in a chunk stay in the union and are not retired. The delta
         is applied before the new summary is vectorized, which is what lets a
         term this change introduces appear in the refreshed sparse vector. The
