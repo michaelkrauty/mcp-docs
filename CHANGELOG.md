@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.6.6] - 2026-11-02
+
+### Changed
+
+- Pin vector-core to v1.12.1. Glossary searches by a server process that has already bound its collection now also stop waiting for the collection lock, so they no longer queue behind an indexing pass or another write holding it. The 1.6.5 entry already said this of glossary searches, but with vector-core 1.12.0 only document and keyword searches skipped the lock; glossary searches still bound their target under it until this release.
+
 ## [1.6.5] - 2026-11-02
 
 ### Changed
