@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.6.5] - 2026-11-02
+
+### Changed
+
+- Pin vector-core to v1.12.0. Document and glossary searches by a server process that has already bound its collection no longer wait for the collection lock, so they no longer queue behind an indexing pass (including OCR of scanned documents) or another write holding it, in this process or another (#105). The first search after a server starts still binds under the lock.
+
 ## [1.6.4] - 2026-11-01
 
 ### Changed
